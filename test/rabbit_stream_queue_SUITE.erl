@@ -28,6 +28,7 @@ suite() ->
 all() ->
     [
       {group, single_node},
+      {group, unclustered},
       {group, clustered}
     ].
 
@@ -36,9 +37,17 @@ groups() ->
      {single_node, [], all_tests()},
      {clustered, [], [
                       {cluster_size_2, [], all_tests()},
-                      {cluster_size_3, [], all_tests()},
+                      {cluster_size_3, [], all_tests() ++ [delete_replica,
+                                                           delete_down_replica,
+                                                           delete_classic_replica,
+                                                           delete_quorum_replica]},
                       {cluster_size_5, [], all_tests()}
-                     ]}
+                     ]},
+     {unclustered, [], [
+                        {unclustered_size_3, [], [add_replica,
+                                                  add_classic_replica,
+                                                  add_quorum_replica]}
+                       ]}
     ].
 
 all_tests() ->
@@ -75,6 +84,7 @@ init_per_group(Group, Config) ->
                       single_node -> 1;
                       cluster_size_2 -> 2;
                       cluster_size_3 -> 3;
+                      unclustered_size_3 -> 3;
                       cluster_size_5 -> 5
                   end,
     Config1 = rabbit_ct_helpers:set_config(Config,
@@ -267,6 +277,154 @@ delete_queue(Config) ->
     ?assertMatch(#'queue.delete_ok'{},
                  amqp_channel:call(Ch, #'queue.delete'{queue = Q})).
 
+add_replica(Config) ->
+    [Server0, Server1, Server2] =
+        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+    %% Not a member of the cluster, what would happen?
+    ?assertEqual({error, node_not_running},
+                 rpc:call(Server0, rabbit_stream_queue, add_replica,
+                          [<<"/">>, Q, Server1])),
+    ok = rabbit_control_helper:command(stop_app, Server1),
+    ok = rabbit_control_helper:command(join_cluster, Server1, [atom_to_list(Server0)], []),
+    rabbit_control_helper:command(start_app, Server1),
+    timer:sleep(1000),
+    ?assertEqual(ok,
+                 rpc:call(Server0, rabbit_stream_queue, add_replica,
+                          [<<"/">>, Q, Server1])),
+    %% replicas must be recorded on the state, and if we publish messages then they must
+    %% be stored on disk
+    [Info0] = rabbit_ct_broker_helpers:rpc(Config, 0,
+                                          rabbit_amqqueue, info_all, [<<"/">>, [leader, replicas]]),
+    ?assertEqual(Server0, proplists:get_value(leader, Info0)),
+    ?assertEqual([Server1], proplists:get_value(replicas, Info0)),
+    %% And if we try again? Idempotent
+    ?assertEqual(ok, rpc:call(Server0, rabbit_stream_queue, add_replica,
+                              [<<"/">>, Q, Server1])),
+    %% Add another node
+    ok = rabbit_control_helper:command(stop_app, Server2),
+    ok = rabbit_control_helper:command(join_cluster, Server2, [atom_to_list(Server0)], []),
+    rabbit_control_helper:command(start_app, Server2),
+    ?assertEqual(ok, rpc:call(Server0, rabbit_stream_queue, add_replica,
+                              [<<"/">>, Q, Server2])),
+    [Info] = rabbit_ct_broker_helpers:rpc(Config, 0,
+                                          rabbit_amqqueue, info_all, [<<"/">>, [leader, replicas]]),
+    ?assertEqual(Server0, proplists:get_value(leader, Info)),
+    Replicas = lists:sort([Server1, Server2]),
+    ?assertEqual(Replicas, lists:sort(proplists:get_value(replicas, Info))).
+
+add_classic_replica(Config) ->
+    [Server0, Server1, Server2] =
+        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"classic">>}])),
+    %% Not a member of the cluster, what would happen?
+    ?assertEqual({error, classic_queue_not_supported},
+                 rpc:call(Server0, rabbit_stream_queue, add_replica,
+                          [<<"/">>, Q, Server1])),
+    ok = rabbit_control_helper:command(stop_app, Server1),
+    ok = rabbit_control_helper:command(join_cluster, Server1, [atom_to_list(Server0)], []),
+    rabbit_control_helper:command(start_app, Server1),
+    timer:sleep(1000),
+    ?assertEqual({error, classic_queue_not_supported},
+                 rpc:call(Server0, rabbit_stream_queue, add_replica,
+                          [<<"/">>, Q, Server1])).
+
+add_quorum_replica(Config) ->
+    [Server0, Server1, Server2] =
+        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"quorum">>}])),
+    %% Not a member of the cluster, what would happen?
+    ?assertEqual({error, quorum_queue_not_supported},
+                 rpc:call(Server0, rabbit_stream_queue, add_replica,
+                          [<<"/">>, Q, Server1])),
+    ok = rabbit_control_helper:command(stop_app, Server1),
+    ok = rabbit_control_helper:command(join_cluster, Server1, [atom_to_list(Server0)], []),
+    rabbit_control_helper:command(start_app, Server1),
+    timer:sleep(1000),
+    ?assertEqual({error, quorum_queue_not_supported},
+                 rpc:call(Server0, rabbit_stream_queue, add_replica,
+                          [<<"/">>, Q, Server1])).
+
+delete_replica(Config) ->
+    [Server0, Server1, Server2] =
+        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+    check_leader_and_replicas(Config, Server0, lists:sort([Server1, Server2])),
+    %% Not a member of the cluster, what would happen?
+    ?assertEqual({error, node_not_running},
+                 rpc:call(Server0, rabbit_stream_queue, delete_replica,
+                          [<<"/">>, Q, 'zen@rabbit'])),
+    ?assertEqual(ok,
+                 rpc:call(Server0, rabbit_stream_queue, delete_replica,
+                          [<<"/">>, Q, Server1])),
+    %% check it's gone
+    check_leader_and_replicas(Config, Server0, [Server2]),
+    %% And if we try again? Idempotent
+    ?assertEqual(ok, rpc:call(Server0, rabbit_stream_queue, delete_replica,
+                              [<<"/">>, Q, Server1])),
+    %% Delete the last replica
+    ?assertEqual(ok, rpc:call(Server0, rabbit_stream_queue, delete_replica,
+                              [<<"/">>, Q, Server2])),
+    check_leader_and_replicas(Config, Server0, []).
+
+delete_classic_replica(Config) ->
+    [Server0, Server1, Server2] =
+        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"classic">>}])),
+    %% Not a member of the cluster, what would happen?
+    ?assertEqual({error, classic_queue_not_supported},
+                 rpc:call(Server0, rabbit_stream_queue, delete_replica,
+                          [<<"/">>, Q, 'zen@rabbit'])),
+    ?assertEqual({error, classic_queue_not_supported},
+                 rpc:call(Server0, rabbit_stream_queue, delete_replica,
+                          [<<"/">>, Q, Server1])).
+
+delete_quorum_replica(Config) ->
+    [Server0, Server1, Server2] =
+        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"quorum">>}])),
+    %% Not a member of the cluster, what would happen?
+    ?assertEqual({error, quorum_queue_not_supported},
+                 rpc:call(Server0, rabbit_stream_queue, delete_replica,
+                          [<<"/">>, Q, 'zen@rabbit'])),
+    ?assertEqual({error, quorum_queue_not_supported},
+                 rpc:call(Server0, rabbit_stream_queue, delete_replica,
+                          [<<"/">>, Q, Server1])).
+
+delete_down_replica(Config) ->
+    [Server0, Server1, Server2] =
+        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+    check_leader_and_replicas(Config, Server0, lists:sort([Server1, Server2])),
+    ok = rabbit_ct_broker_helpers:stop_node(Config, Server1),
+    ?assertEqual({error, node_not_running},
+                 rpc:call(Server0, rabbit_stream_queue, delete_replica,
+                          [<<"/">>, Q, Server1])),
+    %% check it isn't gone
+    check_leader_and_replicas(Config, Server0, lists:sort([Server1, Server2])),
+    ok = rabbit_ct_broker_helpers:start_node(Config, Server1).
+
 %%----------------------------------------------------------------------------
 
 delete_queues() ->
@@ -289,3 +447,9 @@ get_queue_type(Server, Q0) ->
     QNameRes = rabbit_misc:r(<<"/">>, queue, Q0),
     {ok, Q1} = rpc:call(Server, rabbit_amqqueue, lookup, [QNameRes]),
     amqqueue:get_type(Q1).
+
+check_leader_and_replicas(Config, Leader, Replicas) ->
+    [Info] = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_amqqueue,
+                                           info_all, [<<"/">>, [leader, replicas]]),
+    ?assertEqual(Leader, proplists:get_value(leader, Info)),
+    ?assertEqual(Replicas, lists:sort(proplists:get_value(replicas, Info))).
