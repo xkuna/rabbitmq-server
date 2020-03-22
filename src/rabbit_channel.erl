@@ -2382,14 +2382,15 @@ i(Item, _) ->
     throw({bad_argument, Item}).
 
 pending_raft_commands(QStates) ->
-    maps:fold(fun (_, V, Acc) ->
-                      case rabbit_queue_type:state_info(V) of
-                          #{pending_raft_commands := P} ->
-                              Acc + P;
-                          _ ->
-                              Acc
-                      end
-              end, 0, QStates).
+    Fun = fun(_, V, Acc) ->
+                  case rabbit_queue_type:state_info(V) of
+                      #{pending_raft_commands := P} ->
+                          Acc + P;
+                      _ ->
+                          Acc
+                  end
+          end,
+    rabbit_queue_type:fold_state(Fun, 0, QStates).
 
 name(#ch{cfg = #conf{conn_name = ConnName, channel = Channel}}) ->
     list_to_binary(rabbit_misc:format("~s (~p)", [ConnName, Channel])).

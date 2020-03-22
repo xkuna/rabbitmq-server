@@ -29,7 +29,8 @@
          settle/4,
          reject/5,
          credit/5,
-         dequeue/5
+         dequeue/5,
+         fold_state/3
 
          ]).
 
@@ -270,6 +271,9 @@ info(Q, Items) ->
     Mod = amqqueue:get_type(Q),
     Mod:info(Q, Items).
 
+fold_state(Fun, Acc, #?STATE{ctxs = Ctxs}) ->
+    maps:fold(Fun, Acc, Ctxs).
+
 state_info(#ctx{state = S,
                 module = Mod}) ->
     Mod:state_info(S);
@@ -352,7 +356,8 @@ recover(VHost, Qs) ->
                                           end, Acc)
                       %% TODO resolve all registered queue types from registry
               end, #{rabbit_classic_queue => [],
-                     rabbit_quorum_queue => []}, Qs),
+                     rabbit_quorum_queue => [],
+                     rabbit_stream_queue => []}, Qs),
    maps:fold(fun (Mod, Queues, {R0, F0}) ->
                      {R, F} = Mod:recover(VHost, Queues),
                      {R0 ++ R, F0 ++ F}

@@ -10,8 +10,7 @@
 %%
 %% The Original Code is RabbitMQ.
 %%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2018-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2012-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_stream_queue_SUITE).
@@ -57,7 +56,8 @@ all_tests() ->
      declare_invalid_args,
      declare_invalid_properties,
      declare_queue,
-     delete_queue
+     delete_queue,
+     publish_confirm
     ].
 
 %% -------------------------------------------------------------------
@@ -297,10 +297,7 @@ add_replica(Config) ->
                           [<<"/">>, Q, Server1])),
     %% replicas must be recorded on the state, and if we publish messages then they must
     %% be stored on disk
-    [Info0] = rabbit_ct_broker_helpers:rpc(Config, 0,
-                                          rabbit_amqqueue, info_all, [<<"/">>, [leader, replicas]]),
-    ?assertEqual(Server0, proplists:get_value(leader, Info0)),
-    ?assertEqual([Server1], proplists:get_value(replicas, Info0)),
+    check_leader_and_replicas(Config, Server0, [Server1]),
     %% And if we try again? Idempotent
     ?assertEqual(ok, rpc:call(Server0, rabbit_stream_queue, add_replica,
                               [<<"/">>, Q, Server1])),
@@ -310,11 +307,7 @@ add_replica(Config) ->
     rabbit_control_helper:command(start_app, Server2),
     ?assertEqual(ok, rpc:call(Server0, rabbit_stream_queue, add_replica,
                               [<<"/">>, Q, Server2])),
-    [Info] = rabbit_ct_broker_helpers:rpc(Config, 0,
-                                          rabbit_amqqueue, info_all, [<<"/">>, [leader, replicas]]),
-    ?assertEqual(Server0, proplists:get_value(leader, Info)),
-    Replicas = lists:sort([Server1, Server2]),
-    ?assertEqual(Replicas, lists:sort(proplists:get_value(replicas, Info))).
+    check_leader_and_replicas(Config, Server0, [Server1, Server2]).
 
 add_classic_replica(Config) ->
     [Server0, Server1, Server2] =
@@ -361,7 +354,7 @@ delete_replica(Config) ->
     Q = ?config(queue_name, Config),
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
                  declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
-    check_leader_and_replicas(Config, Server0, lists:sort([Server1, Server2])),
+    check_leader_and_replicas(Config, Server0, [Server1, Server2]),
     %% Not a member of the cluster, what would happen?
     ?assertEqual({error, node_not_running},
                  rpc:call(Server0, rabbit_stream_queue, delete_replica,
@@ -416,14 +409,33 @@ delete_down_replica(Config) ->
     Q = ?config(queue_name, Config),
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
                  declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
-    check_leader_and_replicas(Config, Server0, lists:sort([Server1, Server2])),
+    check_leader_and_replicas(Config, Server0, [Server1, Server2]),
     ok = rabbit_ct_broker_helpers:stop_node(Config, Server1),
     ?assertEqual({error, node_not_running},
                  rpc:call(Server0, rabbit_stream_queue, delete_replica,
                           [<<"/">>, Q, Server1])),
     %% check it isn't gone
-    check_leader_and_replicas(Config, Server0, lists:sort([Server1, Server2])),
+    check_leader_and_replicas(Config, Server0, [Server1, Server2]),
     ok = rabbit_ct_broker_helpers:start_node(Config, Server1).
+
+publish_confirm(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    publish(Ch, Q),
+    amqp_channel:register_confirm_handler(Ch, self()),
+    ok = receive
+             #'basic.ack'{}  -> ok;
+             #'basic.nack'{} -> fail
+         after 2500 ->
+                   exit(confirm_timeout)
+         end,
+    ok.
 
 %%----------------------------------------------------------------------------
 
@@ -448,8 +460,18 @@ get_queue_type(Server, Q0) ->
     {ok, Q1} = rpc:call(Server, rabbit_amqqueue, lookup, [QNameRes]),
     amqqueue:get_type(Q1).
 
-check_leader_and_replicas(Config, Leader, Replicas) ->
+check_leader_and_replicas(Config, Leader, Replicas0) ->
     [Info] = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_amqqueue,
-                                           info_all, [<<"/">>, [leader, replicas]]),
+                                           info_all, [<<"/">>, [leader, members]]),
     ?assertEqual(Leader, proplists:get_value(leader, Info)),
-    ?assertEqual(Replicas, lists:sort(proplists:get_value(replicas, Info))).
+    Replicas = lists:sort(Replicas0),
+    ?assertEqual(Replicas, lists:sort(proplists:get_value(members, Info))).
+
+publish(Ch, Queue) ->
+    publish(Ch, Queue, <<"msg">>).
+
+publish(Ch, Queue, Msg) ->
+    ok = amqp_channel:cast(Ch,
+                           #'basic.publish'{routing_key = Queue},
+                           #amqp_msg{props   = #'P_basic'{delivery_mode = 2},
+                                     payload = Msg}).

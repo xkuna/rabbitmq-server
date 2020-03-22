@@ -66,7 +66,8 @@ groups() ->
                                                  trigger_message_store_compaction]},
        {quorum_queue, [parallel], AllTests ++ [delete_immediately_by_pid_fails]},
        {quorum_queue_in_memory_limit, [parallel], AllTests ++ [delete_immediately_by_pid_fails]},
-       {quorum_queue_in_memory_bytes, [parallel], AllTests ++ [delete_immediately_by_pid_fails]}
+       {quorum_queue_in_memory_bytes, [parallel], AllTests ++ [delete_immediately_by_pid_fails]},
+       {stream_queue, [parallel], AllTests}
       ]}
     ].
 
@@ -131,13 +132,24 @@ init_per_group(mirrored_queue, Config) ->
                          {queue_args, [{<<"x-queue-type">>, longstr, <<"classic">>}]},
                          {queue_durable, true}]),
     rabbit_ct_helpers:run_steps(Config1, []);
+init_per_group(stream_queue, Config) ->
+    case rabbit_ct_broker_helpers:enable_feature_flag(Config, stream_queue) of
+        ok ->
+            rabbit_ct_helpers:set_config(
+              Config,
+              [{queue_args, [{<<"x-queue-type">>, longstr, <<"stream">>}]},
+               {queue_durable, true}]);
+        Skip ->
+            Skip
+    end;
 init_per_group(Group, Config0) ->
     case lists:member({group, Group}, all()) of
         true ->
             ClusterSize = 2,
             Config = rabbit_ct_helpers:merge_app_env(
                        Config0, {rabbit, [{channel_tick_interval, 1000},
-                                          {quorum_tick_interval, 1000}]}),
+                                          {quorum_tick_interval, 1000},
+                                          {stream_tick_interval, 1000}]}),
             Config1 = rabbit_ct_helpers:set_config(
                         Config, [ {rmq_nodename_suffix, Group},
                                   {rmq_nodes_count, ClusterSize}
