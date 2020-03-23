@@ -468,13 +468,13 @@ restart_replicas_on_nodes(Conf) ->
                       %% Node is not yet up, this is normal
                       Pids
               end
-      end, [], maps:get(replicas, Conf)).
+      end, [], maps:get(replica_nodes, Conf)).
 
 update_replicas(QName, ReplicaPids0) ->
     Fun = fun (Q) ->
                   Conf = amqqueue:get_type_state(Q),
-                  ReplicaPids = filter_alive(maps:get(replicas, Conf)) ++ ReplicaPids0,
-                  amqqueue:set_type_state(Q, maps:put(replicas, ReplicaPids, Conf))
+                  ReplicaPids = filter_alive(maps:get(replica_pids, Conf)) ++ ReplicaPids0,
+                  amqqueue:set_type_state(Q, maps:put(replica_pids, ReplicaPids, Conf))
           end,
     rabbit_misc:execute_mnesia_transaction(
       fun() -> rabbit_amqqueue:update(QName, Fun) end).

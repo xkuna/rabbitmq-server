@@ -310,7 +310,7 @@ add_replica(Config) ->
     check_leader_and_replicas(Config, Server0, [Server1, Server2]).
 
 add_classic_replica(Config) ->
-    [Server0, Server1, Server2] =
+    [Server0, Server1, _Server2] =
         rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
     Q = ?config(queue_name, Config),
@@ -329,7 +329,7 @@ add_classic_replica(Config) ->
                           [<<"/">>, Q, Server1])).
 
 add_quorum_replica(Config) ->
-    [Server0, Server1, Server2] =
+    [Server0, Server1, _Server2] =
         rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
     Q = ?config(queue_name, Config),
@@ -373,7 +373,7 @@ delete_replica(Config) ->
     check_leader_and_replicas(Config, Server0, []).
 
 delete_classic_replica(Config) ->
-    [Server0, Server1, Server2] =
+    [Server0, Server1, _Server2] =
         rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
     Q = ?config(queue_name, Config),
@@ -388,7 +388,7 @@ delete_classic_replica(Config) ->
                           [<<"/">>, Q, Server1])).
 
 delete_quorum_replica(Config) ->
-    [Server0, Server1, Server2] =
+    [Server0, Server1, _Server2] =
         rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
     Q = ?config(queue_name, Config),
