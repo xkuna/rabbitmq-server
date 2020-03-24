@@ -57,7 +57,9 @@ all_tests() ->
      declare_invalid_properties,
      declare_queue,
      delete_queue,
-     publish_confirm
+     publish,
+     publish_confirm,
+     recover
     ].
 
 %% -------------------------------------------------------------------
@@ -418,6 +420,17 @@ delete_down_replica(Config) ->
     check_leader_and_replicas(Config, Server0, [Server1, Server2]),
     ok = rabbit_ct_broker_helpers:start_node(Config, Server1).
 
+publish(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    publish(Ch, Q),
+    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]).
+
 publish_confirm(Config) ->
     [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
 
@@ -427,15 +440,28 @@ publish_confirm(Config) ->
                  declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
 
     #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
-    publish(Ch, Q),
     amqp_channel:register_confirm_handler(Ch, self()),
-    ok = receive
-             #'basic.ack'{}  -> ok;
-             #'basic.nack'{} -> fail
-         after 2500 ->
-                   exit(confirm_timeout)
-         end,
-    ok.
+    publish(Ch, Q),
+    amqp_channel:wait_for_confirms(Ch, 5000),
+    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]).
+
+recover(Config) ->
+    [Server | _] = Servers = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+    publish(Ch, Q),
+    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]),
+
+    [rabbit_ct_broker_helpers:stop_node(Config, S) || S <- Servers],
+    [rabbit_ct_broker_helpers:start_node(Config, S) || S <- lists:reverse(Servers)],
+
+    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]),
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
+    publish(Ch1, Q),
+    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"2">>, <<"2">>, <<"0">>]]).
 
 %%----------------------------------------------------------------------------
 
