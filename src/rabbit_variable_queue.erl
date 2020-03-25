@@ -2893,20 +2893,13 @@ migrate_queue({QueueName = #resource{virtual_host = VHost, name = Name},
         [Name, VHost]),
     OldStoreClient = get_global_store_client(OldStore),
     NewStoreClient = get_per_vhost_store_client(QueueName, NewStore),
-    %% WARNING: During scan_queue_segments queue index state is being recovered
-    %% and terminated. This can cause side effects!
-    rabbit_queue_index:scan_queue_segments(
-        %% We migrate only persistent messages which are found in message store
-        %% and are not acked yet
-        fun (_SeqId, MsgId, _MsgProps, true, _IsDelivered, no_ack, OldC)
-            when is_binary(MsgId) ->
-                migrate_message(MsgId, OldC, NewStoreClient);
-            (_SeqId, _MsgId, _MsgProps,
-             _IsPersistent, _IsDelivered, _IsAcked, OldC) ->
-                OldC
-        end,
-        OldStoreClient,
-        QueueName),
+    %% WARNING: During persistent_non_acked_messages queue index state
+    %% is being recovered and terminated. This can cause side effects!
+    lists:foldl(
+      fun (MsgId, OldC) ->
+              migrate_message(MsgId, OldC, NewStoreClient)
+      end, OldStoreClient,
+      rabbit_queue_index:persistent_non_acked_message_ids(QueueName)),
     rabbit_msg_store:client_terminate(OldStoreClient),
     rabbit_msg_store:client_terminate(NewStoreClient),
     NewClientRef = rabbit_msg_store:client_ref(NewStoreClient),
