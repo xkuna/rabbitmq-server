@@ -41,12 +41,19 @@
 -export([set_retention_policy/3]).
 -export([add_replica/3,
          delete_replica/3]).
--export([format_osiris_event/3]).
+-export([format_osiris_event/2]).
 
 -include("rabbit.hrl").
 -include("amqqueue.hrl").
 
 -type appender_seq() :: non_neg_integer().
+
+-record(stream, {name :: rabbit_types:r('queue'),
+                 credit :: integer(),
+                 max :: non_neg_integer(),
+                 start_offset = 0 :: non_neg_integer(),
+                 listening_offset = 0 :: non_neg_integer(),
+                 log :: undefined | ra_log_reader:state()}).
 
 -record(stream_client, {name :: term(),
                         %% TODO why it's initialised to a `ra` thing?
@@ -54,7 +61,8 @@
                         next_seq = 1 :: non_neg_integer(),
                         correlation = #{} :: #{appender_seq() => term()},
                         soft_limit :: non_neg_integer(),
-                        slow = false :: boolean()
+                        slow = false :: boolean(),
+                        readers = #{} :: #{term() => #stream{}}
                        }).
 
 -import(rabbit_queue_type_util, [args_policy_lookup/3,
@@ -127,8 +135,68 @@ policy_changed(_Q) ->
 stat(_) ->
     {ok, 0, 0}.
 
-consume(_, _, _) ->
-    ok.
+consume(Q, #{prefetch_count := 0}, _)
+  when ?amqqueue_is_stream(Q) ->
+    rabbit_misc:protocol_error(precondition_failed,
+                               "consumer prefetch count is not set for '~s'",
+                               [rabbit_misc:rs(amqqueue:get_name(Q))]);
+consume(Q, Spec, QState0) when ?amqqueue_is_stream(Q) ->
+    %% Attaches at the tail of the log.
+    %% Incoming acks work as credit to send more records.
+    %% May need to either buffer some entries read from an osiris batch in memory if prefetch is exhausted or allow prefetch to go into negative (this is how the stream2 spike currently works).
+    %% Provide support in osiris for reading from a replica
+    %% Messages should include the offset as a custom header.
+    check_queue_exists_in_local_node(Q),
+    #{no_ack := NoAck,
+      channel_pid := ChPid,
+      prefetch_count := ConsumerPrefetchCount,
+      consumer_tag := ConsumerTag,
+      exclusive_consume := ExclusiveConsume,
+      args := Args,
+      ok_msg := OkMsg} = Spec,
+    QName = amqqueue:get_name(Q),
+    Offset = case rabbit_misc:table_lookup(Args, <<"x-stream-offset">>) of
+                 undefined ->
+                     %% OFFSET can't be undefined in osiris_writer. What do we do?
+                     undefined;
+                 {_, V} ->
+                     V
+             end,
+    %% FIXME: reply needs to be sent before the stream begins sending
+    %% really it should be sent by the stream queue process like classic queues
+    %% do
+    maybe_send_reply(ChPid, OkMsg),
+    QState = begin_stream(QState0, ConsumerTag, Offset, ConsumerPrefetchCount),
+    rabbit_core_metrics:consumer_created(ChPid, ConsumerTag, ExclusiveConsume,
+                                         not NoAck, QName,
+                                         ConsumerPrefetchCount, false,
+                                         up, Args),
+    {ok, QState, []}.
+
+begin_stream(#stream_client{leader = Leader,
+                            readers = Readers0} = State,
+             Tag, Offset, Max) ->
+    case node(Leader) == node() of
+        true ->
+            {ok, Seg0} = osiris_writer:init_offset_reader(Leader, Offset),
+            NextOffset = osiris_log:next_offset(Seg0) - 1,
+            osiris_writer:register_offset_listener(Leader, Offset),
+            %% TODO: avoid double calls to the same process
+            StartOffset = case Offset of
+                              undefined -> NextOffset;
+                              _ ->
+                                  Offset
+                          end,
+            Str0 = #stream{credit = Max,
+                           start_offset = StartOffset,
+                           listening_offset = NextOffset,
+                           log = Seg0,
+                           max = Max},
+            State#stream_client{readers = Readers0#{Tag => Str0}};
+        false ->
+            %% TODO add support to read from replica!
+            exit(non_local_stream_readers_not_supported)
+    end.
 
 cancel(_, _, _, _, _) ->
     ok.
@@ -174,10 +242,13 @@ deliver(_Confirm, #delivery{message = Msg, msg_seq_no = MsgId},
                         correlation = Correlation,
                         slow = Slow}.
 
-dequeue(_, _, _, _) ->
-    ok.
+dequeue(Q, _, _, _) ->
+    rabbit_misc:protocol_error(
+      not_implemented,
+      "basic.get not supported by stream queues ~s",
+      [rabbit_misc:rs(amqqueue:get_name(Q))]).
 
-handle_event({From, Corrs}, State = #stream_client{correlation = Correlation0,
+handle_event({osiris_written, From, Corrs}, State = #stream_client{correlation = Correlation0,
                                                    soft_limit = SftLmt,
                                                    slow = Slow0,
                                                    name = Name}) ->
@@ -191,7 +262,25 @@ handle_event({From, Corrs}, State = #stream_client{correlation = Correlation0,
                    Slow0
            end,
     {ok, State#stream_client{correlation = Correlation,
-                             slow = Slow}, [{settled, From, MsgIds}]}.
+                             slow = Slow}, [{settled, From, MsgIds}]};
+handle_event({osiris_offset, From, _Offs}, State = #stream_client{leader = Leader,
+                                                                  readers = Readers0,
+                                                                  name = Name}) ->
+    %% offset isn't actually needed as we use the atomic to read the
+    %% current committed
+    {Readers, TagMsgs} = maps:fold(
+                           fun (Tag, Str0, {Acc, TM}) ->
+                                   {Str, Msgs} = stream_entries(Name, Leader, Str0),
+                                   %% HACK for now, better to just return but
+                                   %% tricky with acks credits
+                                   %% that also evaluate the stream
+                                   % gen_server:cast(self(), {stream_delivery, Tag, Msgs}),
+                                   {Acc#{Tag => Str}, [{Tag, Leader, Msgs} | TM]}
+                           end, {#{}, []}, Readers0),
+    Ack = true,
+    Deliveries = [{deliver, Tag, Ack, OffsetMsg}
+                  || {Tag, LeaderPid, OffsetMsg} <- TagMsgs],
+    {ok, State#stream_client{readers = Readers}, Deliveries}.
 
 is_recoverable(Q) ->
     Node = node(),
@@ -390,8 +479,8 @@ make_stream_conf(Node, Q) ->
       event_formatter => Formatter,
       epoch => 1}.
 
-format_osiris_event(ServerId, Evt, QRef) ->
-    {'$gen_cast', {queue_event, QRef, {ServerId, Evt}}}.
+format_osiris_event(Evt, QRef) ->
+    {'$gen_cast', {queue_event, QRef, Evt}}.
 
 max_age(Age1, Age2) ->
     min(rabbit_amqqueue:check_max_age(Age1), rabbit_amqqueue:check_max_age(Age2)).
@@ -485,3 +574,71 @@ filter_alive(Pids) ->
                     (_) ->
                          true
                  end, Pids).
+
+check_queue_exists_in_local_node(Q) ->
+    Conf = amqqueue:get_type_state(Q),
+    AllNodes = [maps:get(leader_node, Conf) | maps:get(replica_nodes, Conf)],
+    case lists:member(node(), AllNodes) of
+        true ->
+            ok;
+        false ->
+            rabbit_misc:protocol_error(precondition_failed,
+                                       "queue '~s' does not a have a replica on the local node",
+                                       [rabbit_misc:rs(amqqueue:get_name(Q))])
+    end.
+
+maybe_send_reply(_ChPid, undefined) -> ok;
+maybe_send_reply(ChPid, Msg) -> ok = rabbit_channel:send_command(ChPid, Msg).
+
+stream_entries(Name, Id, Str) ->
+    stream_entries(Name, Id, Str, []).
+
+stream_entries(Name, LeaderPid,
+               #stream{credit = Credit,
+                       start_offset = StartOffs,
+                       listening_offset = LOffs,
+                       log = Seg0} = Str0, MsgIn)
+  when Credit > 0 ->
+    % rabbit_log:info("stream2 entries credit ~b to ~w",
+    %                 [Credit, Name]),
+    case osiris_log:read_chunk_parsed(Seg0) of
+        {end_of_stream, Seg} ->
+            NextOffset = osiris_log:next_offset(Seg),
+            case NextOffset > LOffs of
+                true ->
+                    % rabbit_log:info("stream2 end_of_stream register listener ~w ~w",
+                    %                 [LeaderPid, NextOffset]),
+                    % osiris_writer:register_offset_listener(LeaderPid, NextOffset),
+                    {Str0#stream{log = Seg,
+                                 listening_offset = NextOffset}, MsgIn};
+                false ->
+                    {Str0#stream{log = Seg}, MsgIn}
+            end;
+        {Records, Seg} ->
+            Msgs = [begin
+                        Msg0 = binary_to_term(B),
+                        Msg = rabbit_basic:add_header(<<"x-stream-offset">>,
+                                                      long, O, Msg0),
+                        {Name, LeaderPid, O, false, Msg}
+                    end || {O, B} <- Records,
+                           O >= StartOffs],
+            % rabbit_log:info("stream2 msgs out ~p", [Msgs]),
+            % rabbit_log:info("stream entries got entries", [Entries0]),
+            NumMsgs = length(Msgs),
+
+            Str = Str0#stream{credit = Credit - NumMsgs,
+                              log = Seg},
+            case Str#stream.credit < 1 of
+                true ->
+                    %% we are done here
+                    % rabbit_log:info("stream entries out ~w ~w", [Msgs, Msgs]),
+                    {Str, MsgIn ++ Msgs};
+                false ->
+                    %% if there are fewer Msgs than Entries0 it means there were non-events
+                    %% in the log and we should recurse and try again
+                    stream_entries(Name, LeaderPid, Str, MsgIn ++ Msgs)
+            end
+    end;
+stream_entries(_Name, _Id, Str, Msgs) ->
+    % rabbit_log:info("stream entries none ~w", [Str#stream.credit]),
+    {Str, Msgs}.

@@ -45,7 +45,8 @@ groups() ->
      {unclustered, [], [
                         {unclustered_size_3, [], [add_replica,
                                                   add_classic_replica,
-                                                  add_quorum_replica]}
+                                                  add_quorum_replica,
+                                                  consume_without_local_replica]}
                        ]}
     ].
 
@@ -59,7 +60,9 @@ all_tests() ->
      delete_queue,
      publish,
      publish_confirm,
-     recover
+     recover,
+     consume_without_qos,
+     consume
     ].
 
 %% -------------------------------------------------------------------
@@ -463,6 +466,59 @@ recover(Config) ->
     publish(Ch1, Q),
     quorum_queue_utils:wait_for_messages(Config, [[Q, <<"2">>, <<"2">>, <<"0">>]]).
 
+consume_without_qos(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+    
+    ?assertExit({{shutdown, {server_initiated_close, 406, _}}, _},
+                amqp_channel:subscribe(Ch, #'basic.consume'{queue = Q, consumer_tag = <<"ctag">>},
+                                       self())).
+
+consume_without_local_replica(Config) ->
+    [Server0, Server1 | _] =
+        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+    %% Add another node to the cluster, but it won't have a replica
+    ok = rabbit_control_helper:command(stop_app, Server1),
+    ok = rabbit_control_helper:command(join_cluster, Server1, [atom_to_list(Server0)], []),
+    rabbit_control_helper:command(start_app, Server1),
+    timer:sleep(1000),
+
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server1),
+    ?assertExit({{shutdown, {server_initiated_close, 406, _}}, _},
+                amqp_channel:subscribe(Ch1, #'basic.consume'{queue = Q, consumer_tag = <<"ctag">>},
+                                       self())).
+
+consume(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    amqp_channel:register_confirm_handler(Ch, self()),
+    publish(Ch, Q),
+    amqp_channel:wait_for_confirms(Ch, 5000),
+
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
+    qos(Ch1, 10, false),
+    subscribe(Ch1, Q, false, 0),
+    receive
+        {#'basic.deliver'{}, _} ->
+            ok
+    after 5000 ->
+            exit(timeout)
+    end.
+
 %%----------------------------------------------------------------------------
 
 delete_queues() ->
@@ -501,3 +557,19 @@ publish(Ch, Queue, Msg) ->
                            #'basic.publish'{routing_key = Queue},
                            #amqp_msg{props   = #'P_basic'{delivery_mode = 2},
                                      payload = Msg}).
+
+subscribe(Ch, Queue, NoAck, Offset) ->
+    amqp_channel:subscribe(Ch, #'basic.consume'{queue = Queue,
+                                                no_ack = NoAck,
+                                                consumer_tag = <<"ctag">>,
+                                                arguments = [{<<"x-stream-offset">>, long, Offset}]},
+                           self()),
+    receive
+        #'basic.consume_ok'{consumer_tag = <<"ctag">>} ->
+             ok
+    end.
+
+qos(Ch, Prefetch, Global) ->
+    ?assertMatch(#'basic.qos_ok'{},
+                 amqp_channel:call(Ch, #'basic.qos'{global = Global,
+                                                    prefetch_count = Prefetch})).
