@@ -1352,7 +1352,8 @@ handle_method(#'basic.ack'{delivery_tag = DeliveryTag,
     {Acked, Remaining} = collect_acks(UAMQ, DeliveryTag, Multiple),
     State1 = State#ch{unacked_message_q = Remaining},
     {noreply, case Tx of
-                  none         -> ack(Acked, State1);
+                  none         -> {State2, Actions} = ack(Acked, State1),
+                                  handle_queue_actions(Actions, State2);
                   {Msgs, Acks} -> Acks1 = ack_cons(ack, Acked, Acks),
                                   State1#ch{tx = {Msgs, Acks1}}
               end};
@@ -1576,20 +1577,22 @@ handle_method(#'basic.recover_async'{requeue = true},
                              queue_states = QueueStates0}) ->
     OkFun = fun () -> ok end,
     UAMQL = ?QUEUE:to_list(UAMQ),
-    QueueStates =
+    {QueueStates, Actions} =
         foreach_per_queue(
-          fun ({QPid, CTag}, MsgIds, Acc0) ->
+          fun ({QPid, CTag}, MsgIds, {Acc0, Actions0}) ->
                   rabbit_misc:with_exit_handler(
                     OkFun,
                     fun () ->
-                            rabbit_amqqueue:requeue(QPid, {CTag, MsgIds}, Acc0)
+                            {ok, Acc, Act} = rabbit_amqqueue:requeue(QPid, {CTag, MsgIds}, Acc0),
+                            {Acc, Act ++ Actions0}
                     end)
-          end, lists:reverse(UAMQL), QueueStates0),
+          end, lists:reverse(UAMQL), {QueueStates0, []}),
     ok = notify_limiter(Limiter, UAMQL),
+    State1 = handle_queue_actions(Actions, State#ch{unacked_message_q = ?QUEUE:new(),
+                                                    queue_states = QueueStates}),
     %% No answer required - basic.recover is the newer, synchronous
     %% variant of this method
-    {noreply, State#ch{unacked_message_q = ?QUEUE:new(),
-                       queue_states = QueueStates}};
+    {noreply, State1};
 
 handle_method(#'basic.recover_async'{requeue = false}, _, _State) ->
     rabbit_misc:protocol_error(not_implemented, "requeue=false", []);
@@ -1708,12 +1711,16 @@ handle_method(#'tx.commit'{}, _, State = #ch{tx      = {Msgs, Acks},
                                              limiter = Limiter}) ->
     State1 = queue_fold(fun deliver_to_queues/2, State, Msgs),
     Rev = fun (X) -> lists:reverse(lists:sort(X)) end,
-    State2 = lists:foldl(fun ({ack,     A}, Acc) ->
-                                 ack(Rev(A), Acc);
-                             ({Requeue, A}, Acc) ->
-                                 internal_reject(Requeue, Rev(A), Limiter, Acc)
-                         end, State1, lists:reverse(Acks)),
-    {noreply, maybe_complete_tx(State2#ch{tx = committing})};
+    {State2, Actions2} =
+        lists:foldl(fun ({ack,     A}, {Acc, Actions}) ->
+                            {Acc0, Actions0} = ack(Rev(A), Acc),
+                            {Acc0, Actions ++ Actions0};
+                        ({Requeue, A}, {Acc, Actions}) ->
+                            {Acc0, Actions0} = internal_reject(Requeue, Rev(A), Limiter, Acc),
+                            {Acc0, Actions ++ Actions0}
+                        end, State1, lists:reverse(Acks)),
+    State3 = handle_queue_actions(Actions2, State2),
+    {noreply, maybe_complete_tx(State3#ch{tx = committing})};
 
 handle_method(#'tx.rollback'{}, _, #ch{tx = none}) ->
     precondition_failed("channel is not transactional");
@@ -1981,7 +1988,8 @@ reject(DeliveryTag, Requeue, Multiple,
     State1 = State#ch{unacked_message_q = Remaining},
     {noreply, case Tx of
                   none ->
-                      internal_reject(Requeue, Acked, State1#ch.limiter, State1);
+                      {State2, Actions} = internal_reject(Requeue, Acked, State1#ch.limiter, State1),
+                      handle_queue_actions(Actions, State2);
                   {Msgs, Acks} ->
                       Acks1 = ack_cons(Requeue, Acked, Acks),
                       State1#ch{tx = {Msgs, Acks1}}
@@ -1990,13 +1998,18 @@ reject(DeliveryTag, Requeue, Multiple,
 %% NB: Acked is in youngest-first order
 internal_reject(Requeue, Acked, Limiter,
                 State = #ch{queue_states = QueueStates0}) ->
-    QueueStates = foreach_per_queue(
-                    fun({QRef, CTag}, MsgIds, Acc0) ->
-                            rabbit_queue_type:reject(QRef, CTag, Requeue,
-                                                     MsgIds, Acc0)
-                    end, Acked, QueueStates0),
+    {QueueStates, Actions} =
+        foreach_per_queue(
+          fun({QRef, CTag}, MsgIds, {Acc0, Actions0}) ->
+                  Op = case Requeue of
+                           false -> discard;
+                           true -> requeue
+                       end,
+                  {ok, Acc, Actions} = rabbit_queue_type:settle(QRef, Op, CTag, MsgIds, Acc0),
+                  {Acc, Actions0 ++ Actions}
+          end, Acked, {QueueStates0, []}),
     ok = notify_limiter(Limiter, Acked),
-    State#ch{queue_states = QueueStates}.
+    {State#ch{queue_states = QueueStates}, Actions}.
 
 record_sent(Type, Tag, AckRequired,
             Msg = {QName, _QPid, MsgId, Redelivered, _Message},
@@ -2063,16 +2076,17 @@ collect_acks(ToAcc, PrefixAcc, Q, DeliveryTag, Multiple) ->
 
 %% NB: Acked is in youngest-first order
 ack(Acked, State = #ch{queue_states = QueueStates0}) ->
-    QueueStates =
+    {QueueStates, Actions} =
         foreach_per_queue(
-          fun ({QRef, CTag}, MsgIds, Acc0) ->
-                  % Acc = rabbit_amqqueue:ack(QPid, {CTag, MsgIds}, Acc0),
-                  Acc = rabbit_queue_type:settle(QRef, CTag, MsgIds, Acc0),
+          fun ({QRef, CTag}, MsgIds, {Acc0, ActionsAcc0}) ->
+                  %% Acc = rabbit_amqqueue:ack(QPid, {CTag, MsgIds}, Acc0),
+                  {ok, Acc, ActionsAcc} = rabbit_queue_type:settle(QRef, complete, CTag,
+                                                                   MsgIds, Acc0),
                   incr_queue_stats(QRef, MsgIds, State),
-                  Acc
-          end, Acked, QueueStates0),
+                  {Acc, ActionsAcc0 ++ ActionsAcc}
+          end, Acked, {QueueStates0, []}),
     ok = notify_limiter(State#ch.limiter, Acked),
-    State#ch{queue_states = QueueStates}.
+    {State#ch{queue_states = QueueStates}, Actions}.
 
 incr_queue_stats(QRef, MsgIds, State) ->
     case QRef of

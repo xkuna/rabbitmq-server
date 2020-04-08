@@ -28,8 +28,7 @@
          cancel/5,
          handle_event/2,
          deliver/2,
-         settle/3,
-         reject/4,
+         settle/4,
          credit/4,
          dequeue/4,
          info/2,
@@ -189,19 +188,18 @@ cancel(Q, ConsumerTag, OkMsg, ActingUser, State) ->
         Err -> Err
     end.
 
--spec settle(rabbit_types:ctag(), [non_neg_integer()], state()) ->
+-spec settle(rabbit_queue_type:settle_op(), rabbit_types:ctag(), [non_neg_integer()], state()) ->
     state().
-settle(_CTag, MsgIds, State) ->
+settle(complete, _CTag, MsgIds, State) ->
     delegate:invoke_no_result(State#?STATE.pid,
                               {gen_server2, cast, [{ack, MsgIds, self()}]}),
-    State.
-
-reject(_CTag, Requeue, MsgIds, State) ->
+    {State, []};
+settle(Op, _CTag, MsgIds, State) ->
     ChPid = self(),
     ok = delegate:invoke_no_result(State#?STATE.pid,
                                    {gen_server2, cast,
-                                    [{reject, Requeue, MsgIds, ChPid}]}),
-    State.
+                                    [{reject, Op == requeue, MsgIds, ChPid}]}),
+    {State, []}.
 
 credit(CTag, Credit, Drain, State) ->
     ChPid = self(),

@@ -240,7 +240,7 @@ settle(ConsumerTag, [_|_] = MsgIds, #state{slow = false} = State0) ->
     case send_command(Node, undefined, Cmd, normal, State0) of
         {_, S} ->
             % turn slow into ok for this function
-            S
+            {S, []}
     end;
 settle(ConsumerTag, [_|_] = MsgIds,
        #state{unsent_commands = Unsent0} = State0) ->
@@ -251,7 +251,7 @@ settle(ConsumerTag, [_|_] = MsgIds,
                               fun ({Settles, Returns, Discards}) ->
                                       {Settles ++ MsgIds, Returns, Discards}
                               end, {MsgIds, [], []}, Unsent0),
-    State0#state{unsent_commands = Unsent}.
+    {State0#state{unsent_commands = Unsent}, []}.
 
 %% @doc Return a message to the queue.
 %% @param ConsumerTag the tag uniquely identifying the consumer.
@@ -271,7 +271,7 @@ return(ConsumerTag, [_|_] = MsgIds, #state{slow = false} = State0) ->
     Cmd = rabbit_fifo:make_return(consumer_id(ConsumerTag), MsgIds),
     case send_command(Node, undefined, Cmd, normal, State0) of
         {_, S} ->
-            S
+            {S, []}
     end;
 return(ConsumerTag, [_|_] = MsgIds,
        #state{unsent_commands = Unsent0} = State0) ->
@@ -282,7 +282,7 @@ return(ConsumerTag, [_|_] = MsgIds,
                               fun ({Settles, Returns, Discards}) ->
                                       {Settles, Returns ++ MsgIds, Discards}
                               end, {[], MsgIds, []}, Unsent0),
-    State0#state{unsent_commands = Unsent}.
+    {State0#state{unsent_commands = Unsent}, []}.
 
 %% @doc Discards a checked out message.
 %% If the queue has a dead_letter_handler configured this will be called.
@@ -302,7 +302,7 @@ discard(ConsumerTag, [_|_] = MsgIds, #state{slow = false} = State0) ->
     case send_command(Node, undefined, Cmd, normal, State0) of
         {_, S} ->
             % turn slow into ok for this function
-            S
+            {S, []}
     end;
 discard(ConsumerTag, [_|_] = MsgIds,
         #state{unsent_commands = Unsent0} = State0) ->
@@ -313,7 +313,7 @@ discard(ConsumerTag, [_|_] = MsgIds,
                               fun ({Settles, Returns, Discards}) ->
                                       {Settles, Returns, Discards ++ MsgIds}
                               end, {[], [], MsgIds}, Unsent0),
-    State0#state{unsent_commands = Unsent}.
+    {State0#state{unsent_commands = Unsent}, []}.
 
 
 %% @doc Register with the rabbit_fifo queue to "checkout" messages as they
@@ -696,8 +696,8 @@ maybe_auto_ack(true, Deliver, State0) ->
 maybe_auto_ack(false, {deliver, Tag, _Ack, Msgs} = Deliver, State0) ->
     %% we have to auto ack these deliveries
     MsgIds = [I || {_, _, I, _, _} <- Msgs],
-    State = settle(Tag, MsgIds, State0),
-    {ok, State, [Deliver]}.
+    {State, Actions} = settle(Tag, MsgIds, State0),
+    {ok, State, [Deliver] ++ Actions}.
 
 
 handle_delivery(Leader, {delivery, Tag, [{FstId, _} | _] = IdMsgs},

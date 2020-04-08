@@ -23,7 +23,7 @@
          handle_event/2]).
 -export([is_recoverable/1, recover/2, stop/1, delete/4, delete_immediately/2]).
 -export([state_info/1, info/2, stat/1, infos/1]).
--export([settle/3, reject/4, dequeue/4, consume/3, cancel/5]).
+-export([settle/4, dequeue/4, consume/3, cancel/5]).
 -export([credit/4]).
 -export([purge/1]).
 -export([stateless_deliver/2, deliver/3, deliver/2]).
@@ -551,15 +551,11 @@ delete_immediately(Resource, {_Name, _} = QPid) ->
     rabbit_core_metrics:queue_deleted(Resource),
     ok.
 
-settle(CTag, MsgIds, QState) ->
-    rabbit_fifo_client:settle(quorum_ctag(CTag), MsgIds, QState).
-
--spec reject(rabbit_types:ctag(), Confirm :: boolean(), [msg_id()],
-             rabbit_fifo_client:state()) ->
-    rabbit_fifo_client:state().
-reject(CTag, true, MsgIds, QState) ->
+settle(complete, CTag, MsgIds, QState) ->
+    rabbit_fifo_client:settle(quorum_ctag(CTag), MsgIds, QState);
+settle(requeue, CTag, MsgIds, QState) ->
     rabbit_fifo_client:return(quorum_ctag(CTag), MsgIds, QState);
-reject(CTag, false, MsgIds, QState) ->
+settle(discard, CTag, MsgIds, QState) ->
     rabbit_fifo_client:discard(quorum_ctag(CTag), MsgIds, QState).
 
 credit(CTag, Credit, Drain, QState) ->

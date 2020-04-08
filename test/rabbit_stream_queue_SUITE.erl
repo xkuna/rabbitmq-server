@@ -39,7 +39,8 @@ groups() ->
                       {cluster_size_3, [], all_tests() ++ [delete_replica,
                                                            delete_down_replica,
                                                            delete_classic_replica,
-                                                           delete_quorum_replica]},
+                                                           delete_quorum_replica,
+                                                           consume_from_replica]},
                       {cluster_size_5, [], all_tests()}
                      ]},
      {unclustered, [], [
@@ -62,7 +63,16 @@ all_tests() ->
      publish_confirm,
      recover,
      consume_without_qos,
-     consume
+     consume,
+     basic_get,
+     consume_with_autoack,
+     consume_and_nack,
+     consume_and_ack,
+     consume_and_reject,
+     consume_from_tail,
+     consume_credit,
+     consume_credit_out_of_order_ack,
+     consume_credit_multiple_ack
     ].
 
 %% -------------------------------------------------------------------
@@ -519,6 +529,353 @@ consume(Config) ->
             exit(timeout)
     end.
 
+basic_get(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+    
+    ?assertExit({{shutdown, {connection_closing, {server_initiated_close, 540, _}}}, _},
+                amqp_channel:call(Ch, #'basic.get'{queue = Q})).
+
+consume_with_autoack(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
+    qos(Ch1, 10, false),
+
+    ?assertExit(
+       {{shutdown, {connection_closing, {server_initiated_close, 540, _}}}, _},
+       subscribe(Ch1, Q, true, 0)).
+
+consume_and_nack(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    amqp_channel:register_confirm_handler(Ch, self()),
+    publish(Ch, Q),
+    amqp_channel:wait_for_confirms(Ch, 5000),
+
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
+    qos(Ch1, 10, false),
+    subscribe(Ch1, Q, false, 0),
+    receive
+        {#'basic.deliver'{delivery_tag = DeliveryTag}, _} ->
+            ok = amqp_channel:cast(Ch1, #'basic.nack'{delivery_tag = DeliveryTag,
+                                                      multiple     = false,
+                                                      requeue      = true}),
+            %% Nack will throw a not implemented exception. As it is a cast operation,
+            %% we'll detect the conneciton/channel closure on the next call. 
+            %% Let's try to redeclare and see what happens
+            ?assertExit({{shutdown, {connection_closing, {server_initiated_close, 540, _}}}, _},
+                        declare(Ch1, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}]))
+    after 10000 ->
+            exit(timeout)
+    end.
+
+consume_and_reject(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    amqp_channel:register_confirm_handler(Ch, self()),
+    publish(Ch, Q),
+    amqp_channel:wait_for_confirms(Ch, 5000),
+
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
+    qos(Ch1, 10, false),
+    subscribe(Ch1, Q, false, 0),
+    receive
+        {#'basic.deliver'{delivery_tag = DeliveryTag}, _} ->
+            ok = amqp_channel:cast(Ch1, #'basic.reject'{delivery_tag = DeliveryTag,
+                                                      requeue      = true}),
+            %% Reject will throw a not implemented exception. As it is a cast operation,
+            %% we'll detect the conneciton/channel closure on the next call. 
+            %% Let's try to redeclare and see what happens
+            ?assertExit({{shutdown, {connection_closing, {server_initiated_close, 540, _}}}, _},
+                        declare(Ch1, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}]))
+    after 10000 ->
+            exit(timeout)
+    end.
+
+consume_and_ack(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    amqp_channel:register_confirm_handler(Ch, self()),
+    publish(Ch, Q),
+    amqp_channel:wait_for_confirms(Ch, 5000),
+
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
+    qos(Ch1, 10, false),
+    subscribe(Ch1, Q, false, 0),
+    receive
+        {#'basic.deliver'{delivery_tag = DeliveryTag}, _} ->
+            ok = amqp_channel:cast(Ch1, #'basic.ack'{delivery_tag = DeliveryTag,
+                                                     multiple     = false}),
+            %% It will succeed as ack is now a credit operation. We should be
+            %% able to redeclare a queue (gen_server call op) as the channel
+            %% should still be open and declare is an idempotent operation
+            ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                         declare(Ch1, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+            quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]])
+    after 5000 ->
+            exit(timeout)
+    end.
+
+consume_from_tail(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    amqp_channel:register_confirm_handler(Ch, self()),
+    [publish(Ch, Q, <<"msg1">>) || _ <- lists:seq(1, 100)],
+    amqp_channel:wait_for_confirms(Ch, 5000),
+
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
+    qos(Ch1, 10, false),
+
+    [Info] = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_amqqueue,
+                                           info_all, [<<"/">>, [committed_offset]]),
+
+    %% We'll receive data from the last committed offset, let's check that is not the
+    %% first offset
+    CommittedOffset = proplists:get_value(committed_offset, Info),
+    ?assert(CommittedOffset > 0),
+   
+    %% If the offset is not provided, we're subscribing to the tail of the stream
+    amqp_channel:subscribe(Ch1, #'basic.consume'{queue = Q,
+                                                 no_ack = false,
+                                                 consumer_tag = <<"ctag">>,
+                                                 arguments = []},
+                           self()),
+    receive
+        #'basic.consume_ok'{consumer_tag = <<"ctag">>} ->
+             ok
+    end,
+
+    %% And receive the messages from the last committed offset to the end of the stream
+    receive_batch(Ch1, CommittedOffset, 99),
+
+    %% Publish a few more
+    [publish(Ch, Q, <<"msg2">>) || _ <- lists:seq(1, 100)],
+    amqp_channel:wait_for_confirms(Ch, 5000),
+
+    %% Yeah! we got them
+    receive_batch(Ch1, 100, 199).
+
+consume_from_replica(Config) ->
+    [Server1, Server2 | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server1),
+    Q = ?config(queue_name, Config),
+
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch1, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    #'confirm.select_ok'{} = amqp_channel:call(Ch1, #'confirm.select'{}),
+    amqp_channel:register_confirm_handler(Ch1, self()),
+    [publish(Ch1, Q, <<"msg1">>) || _ <- lists:seq(1, 100)],
+    amqp_channel:wait_for_confirms(Ch1, 5000),
+
+    Ch2 = rabbit_ct_client_helpers:open_channel(Config, Server2),
+    qos(Ch2, 10, false),
+    
+    %% Not implemented yet
+    ?assertExit({{shutdown, {connection_closing, {server_initiated_close, 541, _}}}, _},
+                subscribe(Ch2, Q, false, 0)).
+    %% receive_batch(Ch2, 0, 99).
+
+consume_credit(Config) ->
+    %% Because osiris provides one chunk on every read and we don't want to buffer
+    %% messages in the broker to avoid memory penalties, the credit value won't
+    %% be strict - we allow it into the negative values.
+    %% We can test that after receiving a chunk, no more messages are delivered until
+    %% the credit goes back to a positive value.
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    amqp_channel:register_confirm_handler(Ch, self()),
+    %% Let's publish a big batch, to ensure we have more than a chunk available
+    NumMsgs = 100,
+    [publish(Ch, Q, <<"msg1">>) || _ <- lists:seq(1, NumMsgs)],
+    amqp_channel:wait_for_confirms(Ch, 5000),
+
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
+
+    %% Let's subscribe with a small credit, easier to test
+    Credit = 2,
+    qos(Ch1, Credit, false),
+    subscribe(Ch1, Q, false, 0),
+
+    %% Receive everything
+    DeliveryTags = receive_batch(),
+
+    %% We receive at least the given credit as we know there are 100 messages in the queue
+    ?assert(length(DeliveryTags) >= Credit),
+
+    %% Let's ack as many messages as we can while avoiding a positive credit for new deliveries
+    {ToAck, Pending} = lists:split(length(DeliveryTags) - Credit, DeliveryTags),
+
+    [ok = amqp_channel:cast(Ch1, #'basic.ack'{delivery_tag = DeliveryTag,
+                                              multiple     = false})
+     || DeliveryTag <- ToAck],
+
+    %% Nothing here, this is good
+    receive
+        {#'basic.deliver'{}, _} ->
+            exit(unexpected_delivery)
+    after 1000 ->
+            ok
+    end,
+
+    %% Let's ack one more, we should receive a new chunk
+    ok = amqp_channel:cast(Ch1, #'basic.ack'{delivery_tag = hd(Pending),
+                                             multiple     = false}),
+
+    %% Yeah, here is the new chunk!
+    receive
+        {#'basic.deliver'{}, _} ->
+            ok
+    after 5000 ->
+            exit(timeout)
+    end.
+
+consume_credit_out_of_order_ack(Config) ->
+    %% Like consume_credit but acknowledging the messages out of order.
+    %% We want to ensure it doesn't behave like multiple, that is if we have
+    %% credit 2 and received 10 messages, sending the ack for the message id
+    %% number 10 should only increase credit by 1.
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    amqp_channel:register_confirm_handler(Ch, self()),
+    %% Let's publish a big batch, to ensure we have more than a chunk available
+    NumMsgs = 100,
+    [publish(Ch, Q, <<"msg1">>) || _ <- lists:seq(1, NumMsgs)],
+    amqp_channel:wait_for_confirms(Ch, 5000),
+
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
+
+    %% Let's subscribe with a small credit, easier to test
+    Credit = 2,
+    qos(Ch1, Credit, false),
+    subscribe(Ch1, Q, false, 0),
+
+    %% ******* This is the difference with consume_credit
+    %% Receive everything, let's reverse the delivery tags here so we ack out of order
+    DeliveryTags = lists:reverse(receive_batch()),
+
+    %% We receive at least the given credit as we know there are 100 messages in the queue
+    ?assert(length(DeliveryTags) >= Credit),
+
+    %% Let's ack as many messages as we can while avoiding a positive credit for new deliveries
+    {ToAck, Pending} = lists:split(length(DeliveryTags) - Credit, DeliveryTags),
+
+    [ok = amqp_channel:cast(Ch1, #'basic.ack'{delivery_tag = DeliveryTag,
+                                              multiple     = false})
+     || DeliveryTag <- ToAck],
+
+    %% Nothing here, this is good
+    receive
+        {#'basic.deliver'{}, _} ->
+            exit(unexpected_delivery)
+    after 1000 ->
+            ok
+    end,
+
+    %% Let's ack one more, we should receive a new chunk
+    ok = amqp_channel:cast(Ch1, #'basic.ack'{delivery_tag = hd(Pending),
+                                             multiple     = false}),
+
+    %% Yeah, here is the new chunk!
+    receive
+        {#'basic.deliver'{}, _} ->
+            ok
+    after 5000 ->
+            exit(timeout)
+    end.
+
+consume_credit_multiple_ack(Config) ->
+    %% Like consume_credit but acknowledging the messages out of order.
+    %% We want to ensure it doesn't behave like multiple, that is if we have
+    %% credit 2 and received 10 messages, sending the ack for the message id
+    %% number 10 should only increase credit by 1.
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    amqp_channel:register_confirm_handler(Ch, self()),
+    %% Let's publish a big batch, to ensure we have more than a chunk available
+    NumMsgs = 100,
+    [publish(Ch, Q, <<"msg1">>) || _ <- lists:seq(1, NumMsgs)],
+    amqp_channel:wait_for_confirms(Ch, 5000),
+
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
+
+    %% Let's subscribe with a small credit, easier to test
+    Credit = 2,
+    qos(Ch1, Credit, false),
+    subscribe(Ch1, Q, false, 0),
+
+    %% ******* This is the difference with consume_credit
+    %% Receive everything, let's reverse the delivery tags here so we ack out of order
+    DeliveryTag = lists:last(receive_batch()),
+
+    ok = amqp_channel:cast(Ch1, #'basic.ack'{delivery_tag = DeliveryTag,
+                                             multiple     = true}),
+
+    %% Yeah, here is the new chunk!
+    receive
+        {#'basic.deliver'{}, _} ->
+            ok
+    after 5000 ->
+            exit(timeout)
+    end.
+
 %%----------------------------------------------------------------------------
 
 delete_queues() ->
@@ -573,3 +930,38 @@ qos(Ch, Prefetch, Global) ->
     ?assertMatch(#'basic.qos_ok'{},
                  amqp_channel:call(Ch, #'basic.qos'{global = Global,
                                                     prefetch_count = Prefetch})).
+
+receive_batch(Ch, N, N) ->
+    receive
+        {#'basic.deliver'{delivery_tag = DeliveryTag},
+         #amqp_msg{props = #'P_basic'{headers = [{<<"x-stream-offset">>, long, N}]}}} ->
+            ok = amqp_channel:cast(Ch, #'basic.ack'{delivery_tag = DeliveryTag,
+                                                    multiple     = false})
+    after 5000 ->
+            exit({missing_offset, N})
+    end;
+receive_batch(Ch, N, M) ->
+    receive
+        {_,
+         #amqp_msg{props = #'P_basic'{headers = [{<<"x-stream-offset">>, long, S}]}}}
+          when S < N ->
+            exit({unexpected_offset, S});
+        {#'basic.deliver'{delivery_tag = DeliveryTag},
+         #amqp_msg{props = #'P_basic'{headers = [{<<"x-stream-offset">>, long, N}]}}} ->
+            ok = amqp_channel:cast(Ch, #'basic.ack'{delivery_tag = DeliveryTag,
+                                                    multiple     = false}),
+            receive_batch(Ch, N + 1, M)
+    after 5000 ->
+            exit({missing_offset, N})
+    end.
+
+receive_batch() ->
+    receive_batch([]).
+
+receive_batch(Acc) ->
+    receive
+        {#'basic.deliver'{delivery_tag = DeliveryTag}, _} ->
+            receive_batch([DeliveryTag | Acc])
+    after 5000 ->
+            lists:reverse(Acc)
+    end.

@@ -1386,7 +1386,7 @@ requeue(QRef, {CTag, MsgIds}, QStates) ->
           rabbit_queue_type:ctxs()) ->
     rabbit_queue_type:ctxs().
 ack(QPid, {CTag, MsgIds}, QueueStates) ->
-    rabbit_queue_type:settle(QPid, CTag, MsgIds, QueueStates).
+    rabbit_queue_type:settle(QPid, complete, CTag, MsgIds, QueueStates).
 
 
 -spec reject(pid() | atom(),
@@ -1395,7 +1395,11 @@ ack(QPid, {CTag, MsgIds}, QueueStates) ->
              rabbit_queue_type:ctxs()) ->
     rabbit_queue_type:ctxs().
 reject(QRef, Requeue, {CTag, MsgIds}, QStates) ->
-    rabbit_queue_type:reject(QRef, CTag, Requeue, MsgIds, QStates).
+    Op = case Requeue of
+             true -> requeue;
+             false -> discard
+         end,
+    rabbit_queue_type:settle(QRef, Op, CTag, MsgIds, QStates).
 
 -spec notify_down_all(qpids(), pid()) -> ok_or_errors().
 notify_down_all(QPids, ChPid) ->

@@ -26,8 +26,7 @@
          handle_down/3,
          handle_event/3,
          deliver/3,
-         settle/4,
-         reject/5,
+         settle/5,
          credit/5,
          dequeue/5,
          fold_state/3
@@ -104,6 +103,8 @@
 % copied from rabbit_amqqueue
 -type absent_reason() :: 'nodedown' | 'crashed' | stopped | timeout.
 
+-type settle_op() :: 'complete' | 'requeue' | 'discard'.
+
 %% is the queue type feature enabled
 -callback is_enabled() -> boolean().
 
@@ -160,12 +161,8 @@
                   Delivery :: term()) ->
     {[{amqqueue:amqqueue(), queue_state()}], actions()}.
 
--callback settle(rabbit_types:ctag(), [non_neg_integer()], queue_state()) ->
-    queue_state().
-
--callback reject(rabbit_types:ctag(), Requeue :: boolean(),
-                 MsgIds :: [non_neg_integer()], queue_state()) ->
-    queue_state().
+-callback settle(settle_op(), rabbit_types:ctag(), [non_neg_integer()], queue_state()) ->
+    {queue_state(), actions()}.
 
 -callback credit(rabbit_types:ctag(),
                  non_neg_integer(), Drain :: boolean(), queue_state()) ->
@@ -438,23 +435,14 @@ deliver(Qs, Delivery, #?STATE{} = State0) ->
     return_ok(State, Actions).
 
 
--spec settle(queue_ref(), rabbit_types:ctag(),
-             [non_neg_integer()], state()) -> state().
-settle(QRef, CTag, MsgIds, Ctxs)
+-spec settle(queue_ref(), settle_op(), rabbit_types:ctag(),
+             [non_neg_integer()], state()) -> {ok, state(), actions()}.
+settle(QRef, Op, CTag, MsgIds, Ctxs)
   when ?QREF(QRef) ->
     #ctx{state = State0,
          module = Mod} = Ctx = get_ctx(QRef, Ctxs),
-    State = Mod:settle(CTag, MsgIds, State0),
-    set_ctx(QRef, Ctx#ctx{state = State}, Ctxs).
-
--spec reject(queue_ref(), rabbit_types:ctag(),
-             boolean(), [non_neg_integer()], state()) -> state().
-reject(QRef, CTag, Requeue, MsgIds, Ctxs)
-  when ?QREF(QRef) ->
-    #ctx{state = State0,
-         module = Mod} = Ctx = get_ctx(QRef, Ctxs),
-    State = Mod:reject(CTag, Requeue, MsgIds, State0),
-    set_ctx(QRef, Ctx#ctx{state = State}, Ctxs).
+    {State, Actions} = Mod:settle(Op, CTag, MsgIds, State0),
+    {ok, set_ctx(QRef, Ctx#ctx{state = State}, Ctxs), Actions}.
 
 -spec credit(amqqueue:amqqueue() | queue_ref(),
              rabbit_types:ctag(), non_neg_integer(),
