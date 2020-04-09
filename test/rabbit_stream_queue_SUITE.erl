@@ -72,7 +72,8 @@ all_tests() ->
      consume_from_tail,
      consume_credit,
      consume_credit_out_of_order_ack,
-     consume_credit_multiple_ack
+     consume_credit_multiple_ack,
+     basic_cancel
     ].
 
 %% -------------------------------------------------------------------
@@ -573,6 +574,7 @@ consume_and_nack(Config) ->
     subscribe(Ch1, Q, false, 0),
     receive
         {#'basic.deliver'{delivery_tag = DeliveryTag}, _} ->
+            quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"0">>, <<"1">>]]),
             ok = amqp_channel:cast(Ch1, #'basic.nack'{delivery_tag = DeliveryTag,
                                                       multiple     = false,
                                                       requeue      = true}),
@@ -581,6 +583,32 @@ consume_and_nack(Config) ->
             %% Let's try to redeclare and see what happens
             ?assertExit({{shutdown, {connection_closing, {server_initiated_close, 540, _}}}, _},
                         declare(Ch1, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}]))
+    after 10000 ->
+            exit(timeout)
+    end.
+
+basic_cancel(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    amqp_channel:register_confirm_handler(Ch, self()),
+    publish(Ch, Q),
+    amqp_channel:wait_for_confirms(Ch, 5000),
+
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
+    qos(Ch1, 10, false),
+    subscribe(Ch1, Q, false, 0),
+    ?assertMatch([_], rabbit_ct_broker_helpers:rpc(Config, Server, ets, tab2list,
+                                                   [consumer_created])),
+    receive
+        {#'basic.deliver'{}, _} ->
+            amqp_channel:call(Ch1, #'basic.cancel'{consumer_tag = <<"ctag">>}),
+            ?assertMatch([], rabbit_ct_broker_helpers:rpc(Config, Server, ets, tab2list, [consumer_created]))
     after 10000 ->
             exit(timeout)
     end.

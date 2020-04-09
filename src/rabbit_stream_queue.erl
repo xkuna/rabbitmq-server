@@ -163,15 +163,15 @@ consume(Q, Spec, QState0) when ?amqqueue_is_stream(Q) ->
                  {_, V} ->
                      V
              end,
+    rabbit_core_metrics:consumer_created(ChPid, ConsumerTag, ExclusiveConsume,
+                                         not NoAck, QName,
+                                         ConsumerPrefetchCount, false,
+                                         up, Args),
     %% FIXME: reply needs to be sent before the stream begins sending
     %% really it should be sent by the stream queue process like classic queues
     %% do
     maybe_send_reply(ChPid, OkMsg),
     QState = begin_stream(QState0, ConsumerTag, Offset, ConsumerPrefetchCount),
-    rabbit_core_metrics:consumer_created(ChPid, ConsumerTag, ExclusiveConsume,
-                                         not NoAck, QName,
-                                         ConsumerPrefetchCount, false,
-                                         up, Args),
     {ok, QState, []}.
 
 begin_stream(#stream_client{leader = Leader,
@@ -198,8 +198,16 @@ begin_stream(#stream_client{leader = Leader,
             exit(non_local_stream_readers_not_supported)
     end.
 
-cancel(_, _, _, _, _) ->
-    ok.
+cancel(_Q, ConsumerTag, OkMsg, ActingUser, #stream_client{readers = Readers0,
+                                                          name = QName} = State) ->
+    Readers = maps:remove(ConsumerTag, Readers0),
+    rabbit_core_metrics:consumer_deleted(self(), ConsumerTag, QName),
+    rabbit_event:notify(consumer_deleted, [{consumer_tag, ConsumerTag},
+                                           {channel, self()},
+                                           {queue, QName},
+                                           {user_who_performed_action, ActingUser}]),
+    maybe_send_reply(self(), OkMsg),
+    {ok, State#stream_client{readers = Readers}}.
 
 credit(_, _, _, _) ->
     ok.

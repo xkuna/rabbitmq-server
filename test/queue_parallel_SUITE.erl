@@ -535,6 +535,11 @@ basic_cancel(Config) ->
     publish(Ch, QName, [<<"msg1">>]),
     wait_for_messages(Config, [[QName, <<"1">>, <<"1">>, <<"0">>]]),
     CTag = atom_to_binary(?FUNCTION_NAME, utf8),
+
+    %% Let's set consumer prefetch so it works with stream queues
+    ?assertMatch(#'basic.qos_ok'{},
+                 amqp_channel:call(Ch, #'basic.qos'{global = false,
+                                                    prefetch_count = 1})),
     subscribe(Ch, QName, false, CTag),
     receive
         {#'basic.deliver'{delivery_tag = DeliveryTag}, _} ->

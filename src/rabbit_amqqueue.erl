@@ -1281,7 +1281,12 @@ consumers(Q) when ?amqqueue_is_quorum(Q) ->
     case ra:local_query(QPid, fun rabbit_fifo:query_consumers/1) of
         {ok, {_, Result}, _} -> maps:values(Result);
         _                    -> []
-    end.
+    end;
+consumers(Q) when ?amqqueue_is_stream(Q) ->
+    %% TODO how??? they only exist on the channel
+    %% we could list the offset listener on the writer but we don't even have a consumer tag,
+    %% only a (channel) pid and offset
+    [].
 
 -spec consumer_info_keys() -> rabbit_types:info_keys().
 
