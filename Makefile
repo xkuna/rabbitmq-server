@@ -151,7 +151,7 @@ TEST_DEPS = rabbitmq_ct_helpers rabbitmq_ct_client_helpers amqp_client meck prop
 
 dep_cuttlefish = hex 2.2.0
 dep_syslog = git https://github.com/schlagert/syslog 3.4.5
-dep_osiris = git https://github.com/rabbitmq/osiris
+dep_osiris = git git@github.com:rabbitmq/osiris.git master
 
 define usage_xml_to_erl
 $(subst __,_,$(patsubst $(DOCS_DIR)/rabbitmq%.1.xml, src/rabbit_%_usage.erl, $(subst -,_,$(1))))
