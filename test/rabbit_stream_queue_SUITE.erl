@@ -73,7 +73,8 @@ all_tests() ->
      consume_credit,
      consume_credit_out_of_order_ack,
      consume_credit_multiple_ack,
-     basic_cancel
+     basic_cancel,
+     max_length_bytes
     ].
 
 %% -------------------------------------------------------------------
@@ -574,7 +575,6 @@ consume_and_nack(Config) ->
     subscribe(Ch1, Q, false, 0),
     receive
         {#'basic.deliver'{delivery_tag = DeliveryTag}, _} ->
-            quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"0">>, <<"1">>]]),
             ok = amqp_channel:cast(Ch1, #'basic.nack'{delivery_tag = DeliveryTag,
                                                       multiple     = false,
                                                       requeue      = true}),
@@ -903,6 +903,32 @@ consume_credit_multiple_ack(Config) ->
     after 5000 ->
             exit(timeout)
     end.
+
+max_length_bytes(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>},
+                                 {<<"x-max-length-bytes">>, long, 500},
+                                 {<<"x-max-segment-size">>, long, 250}])),
+
+    Payload = << <<"1">> || _ <- lists:seq(1, 500) >>,
+
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    amqp_channel:register_confirm_handler(Ch, self()),
+    [publish(Ch, Q, Payload) || _ <- lists:seq(1, 100)],
+    amqp_channel:wait_for_confirms(Ch, 5000),
+
+    %% We don't yet have reliable metrics, as the committed offset doesn't work
+    %% as a counter once we start applying retention policies.
+    %% Let's wait for messages and hope these are less than the number of published ones
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
+    qos(Ch1, 100, false),
+    subscribe(Ch1, Q, false, 0),
+
+    ?assert(length(receive_batch()) < 100).
 
 %%----------------------------------------------------------------------------
 

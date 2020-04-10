@@ -179,9 +179,9 @@ begin_stream(#stream_client{leader = Leader,
              Tag, Offset, Max) ->
     case node(Leader) == node() of
         true ->
-            {ok, Seg0} = osiris_writer:init_offset_reader(Leader, Offset),
+            {ok, Seg0} = osiris:init_reader(Leader, Offset),
             NextOffset = osiris_log:next_offset(Seg0) - 1,
-            osiris_writer:register_offset_listener(Leader, NextOffset),
+            osiris:register_offset_listener(Leader, NextOffset),
             %% TODO: avoid double calls to the same process
             StartOffset = case Offset of
                               last -> NextOffset;
@@ -414,7 +414,7 @@ add_replica(VHost, Name, Node) ->
                       true ->
                           Q;
                       false ->
-                          {ok, Pid} = osiris_replica:start(Node, Conf),
+                          {ok, Pid} = osiris:start_replica(Node, Conf),
                           ReplicaPids = maps:get(replica_pids, Conf),
                           Conf1 = maps:put(replica_pids, [Pid | ReplicaPids],
                                            maps:put(replica_nodes, [Node | Replicas], Conf)),
@@ -488,16 +488,16 @@ delete_replica(VHost, Name, Node) ->
 make_stream_conf(Node, Q) ->
     QName = amqqueue:get_name(Q),
     Name = queue_name(QName),
-    MaxLength = args_policy_lookup(<<"max-length">>, fun min/2, Q),
+    %% MaxLength = args_policy_lookup(<<"max-length">>, fun min/2, Q),
     MaxBytes = args_policy_lookup(<<"max-length-bytes">>, fun min/2, Q),
-    MaxAge = args_policy_lookup(<<"max-age">>, fun max_age/2, Q),
+    %% MaxAge = args_policy_lookup(<<"max-age">>, fun max_age/2, Q),
+    MaxSegmentSize = args_policy_lookup(<<"max-segment-size">>, fun min/2, Q),
     Replicas = rabbit_mnesia:cluster_nodes(all) -- [Node],
     Formatter = {?MODULE, format_osiris_event, [QName]},
     #{reference => QName,
       name => Name,
-      max_length => MaxLength,
-      max_bytes => MaxBytes,
-      max_age => MaxAge,
+      retention => [{max_bytes, MaxBytes}],
+      max_segment_size => MaxSegmentSize,
       leader_node => Node,
       replica_nodes => Replicas,
       event_formatter => Formatter,
@@ -542,7 +542,7 @@ recover(Q0) ->
 restart_replica(Q, Node, Conf) ->
     case rabbit_misc:is_process_alive(maps:get(leader_pid, Conf)) of
         true ->
-            case osiris_replica:start(Node, Conf) of
+            case osiris:start_replica(Node, Conf) of
                 {ok, ReplicaPid} ->
                     {ok, update_replicas(amqqueue:get_name(Q), [ReplicaPid])};
                 {error, already_present} ->
@@ -628,7 +628,8 @@ stream_entries(Name, LeaderPid,
             NextOffset = osiris_log:next_offset(Seg),
             case NextOffset > LOffs of
                 true ->
-                    osiris_writer:register_offset_listener(LeaderPid, NextOffset),
+                    Formatter = {?MODULE, format_osiris_event, [Name]},
+                    osiris:register_offset_listener(LeaderPid, NextOffset, Formatter),
                     {Str0#stream{log = Seg,
                                  listening_offset = NextOffset}, MsgIn};
                 false ->
