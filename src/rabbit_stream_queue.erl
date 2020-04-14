@@ -171,32 +171,34 @@ consume(Q, Spec, QState0) when ?amqqueue_is_stream(Q) ->
     %% really it should be sent by the stream queue process like classic queues
     %% do
     maybe_send_reply(ChPid, OkMsg),
-    QState = begin_stream(QState0, ConsumerTag, Offset, ConsumerPrefetchCount),
+    LocalPid = get_local_pid(amqqueue:get_type_state(Q)),
+    QState = begin_stream(QState0, LocalPid, ConsumerTag, Offset, ConsumerPrefetchCount),
     {ok, QState, []}.
 
-begin_stream(#stream_client{leader = Leader,
-                            readers = Readers0} = State,
-             Tag, Offset, Max) ->
-    case node(Leader) == node() of
-        true ->
-            {ok, Seg0} = osiris:init_reader(Leader, Offset),
-            NextOffset = osiris_log:next_offset(Seg0) - 1,
-            osiris:register_offset_listener(Leader, NextOffset),
-            %% TODO: avoid double calls to the same process
-            StartOffset = case Offset of
-                              last -> NextOffset;
-                              _ -> Offset
-                          end,
-            Str0 = #stream{credit = Max,
-                           start_offset = StartOffset,
+get_local_pid(#{leader_pid := Pid}) when node(Pid) == node() ->
+    Pid;
+get_local_pid(#{replica_pids := ReplicaPids}) ->
+    [Local | _] = lists:filter(fun(Pid) ->
+                                       node(Pid) == node()
+                               end, ReplicaPids),
+    Local.
+
+begin_stream(#stream_client{readers = Readers0} = State,
+             LocalPid, Tag, Offset, Max) ->
+    {ok, Seg0} = osiris:init_reader(LocalPid, Offset),
+    NextOffset = osiris_log:next_offset(Seg0) - 1,
+    osiris:register_offset_listener(LocalPid, NextOffset),
+    %% TODO: avoid double calls to the same process
+    StartOffset = case Offset of
+                      last -> NextOffset;
+                      _ -> Offset
+                  end,
+    Str0 = #stream{credit = Max,
+                   start_offset = StartOffset,
                            listening_offset = NextOffset,
-                           log = Seg0,
-                           max = Max},
-            State#stream_client{readers = Readers0#{Tag => Str0}};
-        false ->
-            %% TODO add support to read from replica!
-            exit(non_local_stream_readers_not_supported)
-    end.
+                   log = Seg0,
+                   max = Max},
+    State#stream_client{readers = Readers0#{Tag => Str0}}.
 
 cancel(_Q, ConsumerTag, OkMsg, ActingUser, #stream_client{readers = Readers0,
                                                           name = QName} = State) ->
@@ -493,6 +495,7 @@ make_stream_conf(Node, Q) ->
     %% MaxAge = args_policy_lookup(<<"max-age">>, fun max_age/2, Q),
     MaxSegmentSize = args_policy_lookup(<<"max-segment-size">>, fun min/2, Q),
     Replicas = rabbit_mnesia:cluster_nodes(all) -- [Node],
+    rabbit_log:warning("REPLICAS FOR ~p are ~p", [Name, Replicas]),
     Formatter = {?MODULE, format_osiris_event, [QName]},
     #{reference => QName,
       name => Name,
@@ -602,6 +605,8 @@ filter_alive(Pids) ->
 check_queue_exists_in_local_node(Q) ->
     Conf = amqqueue:get_type_state(Q),
     AllNodes = [maps:get(leader_node, Conf) | maps:get(replica_nodes, Conf)],
+    rabbit_log:warning("CHECK QUEUE ~p EXISTS leader: ~p replicas: ~p",
+                       [Q, maps:get(leader_node, Conf), maps:get(replica_nodes, Conf)]),
     case lists:member(node(), AllNodes) of
         true ->
             ok;
@@ -628,8 +633,7 @@ stream_entries(Name, LeaderPid,
             NextOffset = osiris_log:next_offset(Seg),
             case NextOffset > LOffs of
                 true ->
-                    Formatter = {?MODULE, format_osiris_event, [Name]},
-                    osiris:register_offset_listener(LeaderPid, NextOffset, Formatter),
+                    osiris:register_offset_listener(LeaderPid, NextOffset),
                     {Str0#stream{log = Seg,
                                  listening_offset = NextOffset}, MsgIn};
                 false ->

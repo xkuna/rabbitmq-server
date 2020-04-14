@@ -26,29 +26,24 @@ suite() ->
 
 all() ->
     [
-      {group, single_node},
-      {group, unclustered},
-      {group, clustered}
+     {group, single_node},
+     {group, cluster_size_2},
+     {group, cluster_size_3},
+     {group, unclustered_size_3_1},
+     {group, unclustered_size_3_2}
     ].
 
 groups() ->
     [
      {single_node, [], all_tests()},
-     {clustered, [], [
-                      {cluster_size_2, [], all_tests()},
-                      {cluster_size_3, [], all_tests() ++ [delete_replica,
-                                                           delete_down_replica,
-                                                           delete_classic_replica,
-                                                           delete_quorum_replica,
-                                                           consume_from_replica]},
-                      {cluster_size_5, [], all_tests()}
-                     ]},
-     {unclustered, [], [
-                        {unclustered_size_3, [], [add_replica,
-                                                  add_classic_replica,
-                                                  add_quorum_replica,
-                                                  consume_without_local_replica]}
-                       ]}
+     {cluster_size_2, [], all_tests()},
+     {cluster_size_3, [], all_tests() ++ [delete_replica,
+                                          delete_down_replica,
+                                          delete_classic_replica,
+                                          delete_quorum_replica,
+                                          consume_from_replica]},
+     {unclustered_size_3_1, [], [add_replica]},
+     {unclustered_size_3_2, [], [consume_without_local_replica]}
     ].
 
 all_tests() ->
@@ -92,22 +87,24 @@ init_per_suite(Config0) ->
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
-init_per_group(clustered, Config) ->
-    rabbit_ct_helpers:set_config(Config, [{rmq_nodes_clustered, true}]);
-init_per_group(unclustered, Config) ->
-    rabbit_ct_helpers:set_config(Config, [{rmq_nodes_clustered, false}]);
 init_per_group(Group, Config) ->
     ClusterSize = case Group of
                       single_node -> 1;
                       cluster_size_2 -> 2;
                       cluster_size_3 -> 3;
-                      unclustered_size_3 -> 3;
-                      cluster_size_5 -> 5
+                      unclustered_size_3_1 -> 3;
+                      unclustered_size_3_2 -> 3
                   end,
+    Clustered = case Group of
+                    unclustered_size_3_1 -> false;
+                    unclustered_size_3_2 -> false;
+                    _ -> true
+                end,
     Config1 = rabbit_ct_helpers:set_config(Config,
                                            [{rmq_nodes_count, ClusterSize},
                                             {rmq_nodename_suffix, Group},
-                                            {tcp_ports_base}]),
+                                            {tcp_ports_base},
+                                            {rmq_nodes_clustered, Clustered}]),
     Config1b = rabbit_ct_helpers:set_config(Config1, [{net_ticktime, 10}]),
     Ret = rabbit_ct_helpers:run_steps(Config1b,
                                       [fun merge_app_env/1 ] ++
@@ -123,26 +120,13 @@ init_per_group(Group, Config) ->
                     ok = rabbit_ct_broker_helpers:rpc(
                            Config2, 0, application, set_env,
                            [rabbit, channel_tick_interval, 100]),
-                    %% HACK: the larger cluster sizes benefit for a bit
-                    %% more time after clustering before running the
-                    %% tests.
-                    case Group of
-                        cluster_size_5 ->
-                            timer:sleep(5000),
-                            Config2;
-                        _ ->
-                            Config2
-                    end;
+                    Config2;
                 Skip ->
                     end_per_group(Group, Config2),
                     Skip
             end
     end.
 
-end_per_group(clustered, Config) ->
-    Config;
-end_per_group(unclustered, Config) ->
-    Config;
 end_per_group(_, Config) ->
     rabbit_ct_helpers:run_steps(Config,
                                 rabbit_ct_broker_helpers:teardown_steps()).
@@ -150,10 +134,7 @@ end_per_group(_, Config) ->
 init_per_testcase(Testcase, Config) ->
     Config1 = rabbit_ct_helpers:testcase_started(Config, Testcase),
     Q = rabbit_data_coercion:to_binary(Testcase),
-    Config2 = rabbit_ct_helpers:set_config(Config1,
-                                           [{queue_name, Q},
-                                            {alt_queue_name, <<Q/binary, "_alt">>}
-                                           ]),
+    Config2 = rabbit_ct_helpers:set_config(Config1, [{queue_name, Q}]),
     rabbit_ct_helpers:run_steps(Config2, rabbit_ct_client_helpers:setup_steps()).
 
 merge_app_env(Config) ->
@@ -299,22 +280,47 @@ add_replica(Config) ->
         rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
     Q = ?config(queue_name, Config),
+
+    %% Let's also try the add replica command on other queue types, it should fail
+    %% We're doing it in the same test for efficiency, otherwise we have to
+    %% start new rabbitmq clusters every time for a minor testcase
+    QClassic = <<Q/binary, "_classic">>,
+    QQuorum = <<Q/binary, "_quorum">>,
+
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
                  declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+    ?assertEqual({'queue.declare_ok', QClassic, 0, 0},
+                 declare(Ch, QClassic, [{<<"x-queue-type">>, longstr, <<"classic">>}])),
+    ?assertEqual({'queue.declare_ok', QQuorum, 0, 0},
+                 declare(Ch, QQuorum, [{<<"x-queue-type">>, longstr, <<"quorum">>}])),
+
     %% Not a member of the cluster, what would happen?
     ?assertEqual({error, node_not_running},
                  rpc:call(Server0, rabbit_stream_queue, add_replica,
                           [<<"/">>, Q, Server1])),
+    ?assertEqual({error, classic_queue_not_supported},
+                 rpc:call(Server0, rabbit_stream_queue, add_replica,
+                          [<<"/">>, QClassic, Server1])),
+    ?assertEqual({error, quorum_queue_not_supported},
+                 rpc:call(Server0, rabbit_stream_queue, add_replica,
+                          [<<"/">>, QQuorum, Server1])),
+
     ok = rabbit_control_helper:command(stop_app, Server1),
     ok = rabbit_control_helper:command(join_cluster, Server1, [atom_to_list(Server0)], []),
     rabbit_control_helper:command(start_app, Server1),
     timer:sleep(1000),
+    ?assertEqual({error, classic_queue_not_supported},
+                 rpc:call(Server0, rabbit_stream_queue, add_replica,
+                          [<<"/">>, QClassic, Server1])),
+    ?assertEqual({error, quorum_queue_not_supported},
+                 rpc:call(Server0, rabbit_stream_queue, add_replica,
+                          [<<"/">>, QQuorum, Server1])),
     ?assertEqual(ok,
                  rpc:call(Server0, rabbit_stream_queue, add_replica,
                           [<<"/">>, Q, Server1])),
     %% replicas must be recorded on the state, and if we publish messages then they must
     %% be stored on disk
-    check_leader_and_replicas(Config, Server0, [Server1]),
+    check_leader_and_replicas(Config, Q, Server0, [Server1]),
     %% And if we try again? Idempotent
     ?assertEqual(ok, rpc:call(Server0, rabbit_stream_queue, add_replica,
                               [<<"/">>, Q, Server1])),
@@ -324,45 +330,7 @@ add_replica(Config) ->
     rabbit_control_helper:command(start_app, Server2),
     ?assertEqual(ok, rpc:call(Server0, rabbit_stream_queue, add_replica,
                               [<<"/">>, Q, Server2])),
-    check_leader_and_replicas(Config, Server0, [Server1, Server2]).
-
-add_classic_replica(Config) ->
-    [Server0, Server1, _Server2] =
-        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-    Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
-    Q = ?config(queue_name, Config),
-    ?assertEqual({'queue.declare_ok', Q, 0, 0},
-                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"classic">>}])),
-    %% Not a member of the cluster, what would happen?
-    ?assertEqual({error, classic_queue_not_supported},
-                 rpc:call(Server0, rabbit_stream_queue, add_replica,
-                          [<<"/">>, Q, Server1])),
-    ok = rabbit_control_helper:command(stop_app, Server1),
-    ok = rabbit_control_helper:command(join_cluster, Server1, [atom_to_list(Server0)], []),
-    rabbit_control_helper:command(start_app, Server1),
-    timer:sleep(1000),
-    ?assertEqual({error, classic_queue_not_supported},
-                 rpc:call(Server0, rabbit_stream_queue, add_replica,
-                          [<<"/">>, Q, Server1])).
-
-add_quorum_replica(Config) ->
-    [Server0, Server1, _Server2] =
-        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-    Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
-    Q = ?config(queue_name, Config),
-    ?assertEqual({'queue.declare_ok', Q, 0, 0},
-                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"quorum">>}])),
-    %% Not a member of the cluster, what would happen?
-    ?assertEqual({error, quorum_queue_not_supported},
-                 rpc:call(Server0, rabbit_stream_queue, add_replica,
-                          [<<"/">>, Q, Server1])),
-    ok = rabbit_control_helper:command(stop_app, Server1),
-    ok = rabbit_control_helper:command(join_cluster, Server1, [atom_to_list(Server0)], []),
-    rabbit_control_helper:command(start_app, Server1),
-    timer:sleep(1000),
-    ?assertEqual({error, quorum_queue_not_supported},
-                 rpc:call(Server0, rabbit_stream_queue, add_replica,
-                          [<<"/">>, Q, Server1])).
+    check_leader_and_replicas(Config, Q, Server0, [Server1, Server2]).
 
 delete_replica(Config) ->
     [Server0, Server1, Server2] =
@@ -371,7 +339,7 @@ delete_replica(Config) ->
     Q = ?config(queue_name, Config),
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
                  declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
-    check_leader_and_replicas(Config, Server0, [Server1, Server2]),
+    check_leader_and_replicas(Config, Q, Server0, [Server1, Server2]),
     %% Not a member of the cluster, what would happen?
     ?assertEqual({error, node_not_running},
                  rpc:call(Server0, rabbit_stream_queue, delete_replica,
@@ -380,14 +348,14 @@ delete_replica(Config) ->
                  rpc:call(Server0, rabbit_stream_queue, delete_replica,
                           [<<"/">>, Q, Server1])),
     %% check it's gone
-    check_leader_and_replicas(Config, Server0, [Server2]),
+    check_leader_and_replicas(Config, Q, Server0, [Server2]),
     %% And if we try again? Idempotent
     ?assertEqual(ok, rpc:call(Server0, rabbit_stream_queue, delete_replica,
                               [<<"/">>, Q, Server1])),
     %% Delete the last replica
     ?assertEqual(ok, rpc:call(Server0, rabbit_stream_queue, delete_replica,
                               [<<"/">>, Q, Server2])),
-    check_leader_and_replicas(Config, Server0, []).
+    check_leader_and_replicas(Config, Q, Server0, []).
 
 delete_classic_replica(Config) ->
     [Server0, Server1, _Server2] =
@@ -426,13 +394,13 @@ delete_down_replica(Config) ->
     Q = ?config(queue_name, Config),
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
                  declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
-    check_leader_and_replicas(Config, Server0, [Server1, Server2]),
+    check_leader_and_replicas(Config, Q, Server0, [Server1, Server2]),
     ok = rabbit_ct_broker_helpers:stop_node(Config, Server1),
     ?assertEqual({error, node_not_running},
                  rpc:call(Server0, rabbit_stream_queue, delete_replica,
                           [<<"/">>, Q, Server1])),
     %% check it isn't gone
-    check_leader_and_replicas(Config, Server0, [Server1, Server2]),
+    check_leader_and_replicas(Config, Q, Server0, [Server1, Server2]),
     ok = rabbit_ct_broker_helpers:start_node(Config, Server1).
 
 publish(Config) ->
@@ -504,6 +472,7 @@ consume_without_local_replica(Config) ->
     timer:sleep(1000),
 
     Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server1),
+    qos(Ch1, 10, false),
     ?assertExit({{shutdown, {server_initiated_close, 406, _}}, _},
                 amqp_channel:subscribe(Ch1, #'basic.consume'{queue = Q, consumer_tag = <<"ctag">>},
                                        self())).
@@ -603,8 +572,11 @@ basic_cancel(Config) ->
     Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
     qos(Ch1, 10, false),
     subscribe(Ch1, Q, false, 0),
-    ?assertMatch([_], rabbit_ct_broker_helpers:rpc(Config, Server, ets, tab2list,
-                                                   [consumer_created])),
+    rabbit_ct_helpers:await_condition(
+      fun() ->
+              1 == length(rabbit_ct_broker_helpers:rpc(Config, Server, ets, tab2list,
+                                                       [consumer_created]))
+      end, 30000),
     receive
         {#'basic.deliver'{}, _} ->
             amqp_channel:call(Ch1, #'basic.cancel'{consumer_tag = <<"ctag">>}),
@@ -735,10 +707,8 @@ consume_from_replica(Config) ->
     Ch2 = rabbit_ct_client_helpers:open_channel(Config, Server2),
     qos(Ch2, 10, false),
     
-    %% Not implemented yet
-    ?assertExit({{shutdown, {connection_closing, {server_initiated_close, 541, _}}}, _},
-                subscribe(Ch2, Q, false, 0)).
-    %% receive_batch(Ch2, 0, 99).
+    subscribe(Ch2, Q, false, 0),
+    receive_batch(Ch2, 0, 99).
 
 consume_credit(Config) ->
     %% Because osiris provides one chunk on every read and we don't want to buffer
@@ -953,9 +923,14 @@ get_queue_type(Server, Q0) ->
     {ok, Q1} = rpc:call(Server, rabbit_amqqueue, lookup, [QNameRes]),
     amqqueue:get_type(Q1).
 
-check_leader_and_replicas(Config, Leader, Replicas0) ->
-    [Info] = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_amqqueue,
-                                           info_all, [<<"/">>, [leader, members]]),
+check_leader_and_replicas(Config, Name, Leader, Replicas0) -> 
+    QNameRes = rabbit_misc:r(<<"/">>, queue, Name),
+    [Info] = lists:filter(
+               fun(Props) ->
+                       lists:member({name, QNameRes}, Props)
+               end,
+               rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_amqqueue,
+                                            info_all, [<<"/">>, [name, leader, members]])),
     ?assertEqual(Leader, proplists:get_value(leader, Info)),
     Replicas = lists:sort(Replicas0),
     ?assertEqual(Replicas, lists:sort(proplists:get_value(members, Info))).
