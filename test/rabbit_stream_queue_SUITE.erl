@@ -15,6 +15,7 @@
 
 -module(rabbit_stream_queue_SUITE).
 
+-include_lib("proper/include/proper.hrl").
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
@@ -59,6 +60,7 @@ all_tests() ->
      recover,
      consume_without_qos,
      consume,
+     consume_offset,
      basic_get,
      consume_with_autoack,
      consume_and_nack,
@@ -499,6 +501,41 @@ consume(Config) ->
     after 5000 ->
             exit(timeout)
     end.
+
+consume_offset(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    amqp_channel:register_confirm_handler(Ch, self()),
+    Payload = << <<"1">> || _ <- lists:seq(1, 500) >>,
+    [publish(Ch, Q, Payload) || _ <- lists:seq(1, 1000)],
+    amqp_channel:wait_for_confirms(Ch, 5000),
+
+    run_proper(
+      fun () ->
+              ?FORALL(Offset, range(0, 999),
+                      begin
+                          Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
+                          qos(Ch1, 10, false),
+                          subscribe(Ch1, Q, false, Offset),
+                          receive_batch(Ch1, Offset, 999),
+                          receive
+                              {_,
+                               #amqp_msg{props = #'P_basic'{headers = [{<<"x-stream-offset">>, long, S}]}}}
+                                when S < Offset ->
+                                  exit({unexpected_offset, S})
+                          after 1000 ->
+                                  ok
+                          end,
+                          amqp_channel:call(Ch1, #'basic.cancel'{consumer_tag = <<"ctag">>}),
+                          true
+                      end)
+      end, [], 25).
 
 basic_get(Config) ->
     [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
@@ -994,3 +1031,13 @@ receive_batch(Acc) ->
     after 5000 ->
             lists:reverse(Acc)
     end.
+
+run_proper(Fun, Args, NumTests) ->
+    ?assertEqual(
+       true,
+       proper:counterexample(
+         erlang:apply(Fun, Args),
+         [{numtests, NumTests},
+          {on_output, fun(".", _) -> ok; % don't print the '.'s on new lines
+                         (F, A) -> ct:pal(?LOW_IMPORTANCE, F, A)
+                      end}])).
