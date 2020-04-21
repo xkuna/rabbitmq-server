@@ -84,32 +84,28 @@ declare(Q0, Node) when ?amqqueue_is_stream(Q0) ->
     Opts = amqqueue:get_options(Q0),
     ActingUser = maps:get(user, Opts, ?UNKNOWN_USER),
     Conf0 = make_stream_conf(Node, Q0),
-    case osiris:start_cluster(Conf0) of
-        {ok, #{leader_pid := LeaderPid} = Conf} ->
-            Q1 = amqqueue:set_type_state(amqqueue:set_pid(Q0, LeaderPid), Conf),
-            case rabbit_amqqueue:internal_declare(Q1, false) of
-                {created, Q} ->
-                    rabbit_event:notify(queue_created,
-                                        [{name, QName},
-                                         {durable, true},
-                                         {auto_delete, false},
-                                         {arguments, Arguments},
-                                         {user_who_performed_action,
-                                          ActingUser}]),
-                    {new, Q};
-                {error, Error} ->
-                    _ = rabbit_amqqueue:internal_delete(QName, ActingUser),
-                    rabbit_misc:protocol_error(
-                      internal_error,
-                      "Cannot declare a queue '~s' on node '~s': ~255p",
-                      [rabbit_misc:rs(QName), node(), Error]);
-                {existing, _} = Ex ->
-                    Ex
-            end;
-        {error, {already_started, _}} ->
+    case rabbit_stream_coordinator:start_cluster(amqqueue:set_type_state(Q0, Conf0)) of
+        {error, already_started} ->
             rabbit_misc:protocol_error(precondition_failed,
                                        "safe queue name already in use '~s'",
-                                       [Node])
+                                       [Node]);
+        {created, Q} ->
+            rabbit_event:notify(queue_created,
+                                [{name, QName},
+                                 {durable, true},
+                                 {auto_delete, false},
+                                 {arguments, Arguments},
+                                 {user_who_performed_action,
+                                  ActingUser}]),
+            {new, Q};
+        {error, Error} ->
+            _ = rabbit_amqqueue:internal_delete(QName, ActingUser),
+            rabbit_misc:protocol_error(
+              internal_error,
+              "Cannot declare a queue '~s' on node '~s': ~255p",
+              [rabbit_misc:rs(QName), node(), Error]);
+        {existing, _} = Ex ->
+            Ex
     end.
 
 -spec delete(amqqueue:amqqueue(), boolean(),
@@ -117,10 +113,8 @@ declare(Q0, Node) when ?amqqueue_is_stream(Q0) ->
     rabbit_types:ok(non_neg_integer()) |
     rabbit_types:error(in_use | not_empty).
 delete(Q, _IfUnused, _IfEmpty, ActingUser) ->
-    osiris:delete_cluster(amqqueue:get_type_state(Q)),
-    _ = rabbit_amqqueue:internal_delete(amqqueue:get_name(Q), ActingUser),
-    %% TODO return number of ready messages
-    {ok, 0}.
+    Name = maps:get(name, amqqueue:get_type_state(Q)),
+    rabbit_stream_coordinator:delete_cluster(Name, ActingUser).
 
 -spec purge(amqqueue:amqqueue()) ->
     {'ok', non_neg_integer()}.
@@ -495,7 +489,6 @@ make_stream_conf(Node, Q) ->
     %% MaxAge = args_policy_lookup(<<"max-age">>, fun max_age/2, Q),
     MaxSegmentSize = args_policy_lookup(<<"max-segment-size">>, fun min/2, Q),
     Replicas = rabbit_mnesia:cluster_nodes(all) -- [Node],
-    rabbit_log:warning("REPLICAS FOR ~p are ~p", [Name, Replicas]),
     Formatter = {?MODULE, format_osiris_event, [QName]},
     #{reference => QName,
       name => Name,
@@ -605,8 +598,6 @@ filter_alive(Pids) ->
 check_queue_exists_in_local_node(Q) ->
     Conf = amqqueue:get_type_state(Q),
     AllNodes = [maps:get(leader_node, Conf) | maps:get(replica_nodes, Conf)],
-    rabbit_log:warning("CHECK QUEUE ~p EXISTS leader: ~p replicas: ~p",
-                       [Q, maps:get(leader_node, Conf), maps:get(replica_nodes, Conf)]),
     case lists:member(node(), AllNodes) of
         true ->
             ok;
