@@ -42,7 +42,8 @@ groups() ->
                                           delete_down_replica,
                                           delete_classic_replica,
                                           delete_quorum_replica,
-                                          consume_from_replica]},
+                                          consume_from_replica,
+                                          leader_failover]},
      {unclustered_size_3_1, [], [add_replica]},
      {unclustered_size_3_2, [], [consume_without_local_replica]}
     ].
@@ -936,6 +937,36 @@ max_length_bytes(Config) ->
     subscribe(Ch1, Q, false, 0),
 
     ?assert(length(receive_batch()) < 100).
+
+leader_failover(Config) ->
+    [Server1, Server2, Server3] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server1),
+    Q = ?config(queue_name, Config),
+
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch1, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    #'confirm.select_ok'{} = amqp_channel:call(Ch1, #'confirm.select'{}),
+    amqp_channel:register_confirm_handler(Ch1, self()),
+    [publish(Ch1, Q, <<"msg">>) || _ <- lists:seq(1, 100)],
+    amqp_channel:wait_for_confirms(Ch1, 5000),
+
+    check_leader_and_replicas(Config, Q, Server1, [Server2, Server3]),
+
+    ok = rabbit_ct_broker_helpers:stop_node(Config, Server1),
+    timer:sleep(30000),
+
+    [Info] = lists:filter(
+               fun(Props) ->
+                       QName = rabbit_misc:r(<<"/">>, queue, Q),
+                       lists:member({name, QName}, Props)
+               end,
+               rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_amqqueue,
+                                            info_all, [<<"/">>, [name, leader, members]])),
+    NewLeader = proplists:get_value(leader, Info),
+    ?assert(NewLeader =/= Server1),
+    ok = rabbit_ct_broker_helpers:start_node(Config, Server1).
 
 %%----------------------------------------------------------------------------
 

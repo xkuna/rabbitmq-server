@@ -639,7 +639,7 @@ init_aux(Name) when is_atom(Name) ->
     Now = erlang:monotonic_time(micro_seconds),
     {Name, {inactive, Now, 1, 1.0}}.
 
-handle_aux(_, cast, Cmd, {Name, Use0}, Log, _) ->
+handle_aux(leader, cast, Cmd, {Name, Use0}, Log, _) ->
     Use = case Cmd of
               _ when Cmd == active orelse Cmd == inactive ->
                   update_use(Use0, Cmd);
