@@ -27,7 +27,8 @@
 
 -export([start_cluster/1,
          delete_cluster/2,
-         add_replica/2]).
+         add_replica/2,
+         delete_replica/2]).
 
 -export([phase_repair_mnesia/2,
          phase_repair_mnesia/3,
@@ -36,7 +37,8 @@
          phase_check_quorum/2,
          phase_start_new_leader/1,
          phase_restart_replicas/1,
-         phase_start_replica/3]).
+         phase_start_replica/3,
+         phase_delete_replica/3]).
 
 -define(STREAM_COORDINATOR_STARTUP, {stream_coordinator_startup, self()}).
 
@@ -96,6 +98,10 @@ add_replica(Name, Node) ->
     Server = {?MODULE, node()},
     ra:process_command(Server, {start_replica, Name, Node}).
 
+delete_replica(Name, Node) ->
+    Server = {?MODULE, node()},
+    ra:process_command(Server, {delete_replica, Name, Node}).
+
 init(_Conf) ->
     #?MODULE{streams = #{}}.
 
@@ -120,13 +126,32 @@ apply(_Meta, {start_cluster_reply, StreamId, From, {error, {already_started, _}}
     {State#?MODULE{streams = maps:remove(StreamId, Streams)}, ok,
      [{reply, From, {error, already_started}}]};
 apply(#{from := From}, {start_replica, StreamId, Node}, #?MODULE{streams = Streams} = State) ->
-    Conf = maps:get(StreamId, Streams),
-    Replicas = maps:get(replica_nodes, Conf),
-    case lists:member(Node, Replicas) of
-        true ->
-            {State, '$ra_no_reply', [{reply, From, ok}]};
-        false ->
-            {State, '$ra_no_reply', [{aux, {phase, StreamId, phase_start_replica, [From, Node, Conf]}}]}
+    case maps:get(StreamId, Streams, undefined) of
+        undefined ->
+            {State, '$ra_no_reply', [{reply, From, {error, not_found}}]};
+        Conf ->
+            Replicas = maps:get(replica_nodes, Conf),
+            case lists:member(Node, Replicas) of
+                true ->
+                    {State, '$ra_no_reply', [{reply, From, ok}]};
+                false ->
+                    {State, '$ra_no_reply', [{aux, {phase, StreamId, phase_start_replica,
+                                                    [From, Node, Conf]}}]}
+            end
+    end;
+apply(#{from := From}, {delete_replica, StreamId, Node}, #?MODULE{streams = Streams} = State) ->
+    case maps:get(StreamId, Streams, undefined) of
+        undefined ->
+            {State, '$ra_no_reply', [{reply, From, {error, not_found}}]};
+        Conf ->
+            Replicas = maps:get(replica_nodes, Conf),
+            case lists:member(Node, Replicas) of
+                false ->
+                    {State, '$ra_no_reply', [{reply, From, ok}]};
+                true ->
+                    {State, '$ra_no_reply', [{aux, {phase, StreamId, phase_delete_replica,
+                                                    [From, Node, Conf]}}]}
+            end
     end;
 apply(#{from := From}, {delete_cluster, StreamId, ActingUser}, #?MODULE{streams = Streams} = State) ->
     case maps:get(StreamId, Streams, undefined) of
@@ -212,15 +237,30 @@ find_stream0(Pid, Iterator0) ->
             exit(stream_not_found)
     end.
 
-phase_start_replica(From, Node, #{replica_nodes := Replicas} = Conf0) ->
+phase_start_replica(From, Node, #{replica_nodes := Replicas0,
+                                 replica_pids := ReplicaPids0} = Conf0) ->
     spawn(
       fun() ->
               {ok, Pid} = osiris:start_replica(Node, Conf0),
-              ReplicaPids = maps:get(replica_pids, Conf0),
-              Conf = maps:put(replica_pids, [Pid | ReplicaPids],
-                             maps:put(replica_nodes, [Node | Replicas], Conf0)),
-              ra:pipeline_command({?MODULE, node()},
-                                  {stream_updated, From, maps:put(replica_pids, ReplicaPids, Conf)})
+              ReplicaPids = [Pid | ReplicaPids0],
+              Replicas = [Node | Replicas0],
+              Conf = maps:put(replica_pids, ReplicaPids,
+                             maps:put(replica_nodes, Replicas, Conf0)),
+              ra:pipeline_command({?MODULE, node()}, {stream_updated, From, Conf})
+      end).
+
+phase_delete_replica(From, Node, #{replica_nodes := Replicas0,
+                                   replica_pids := ReplicaPids0} = Conf0) ->
+    spawn(
+      fun() ->
+              ok = osiris_replica:delete(Node, Conf0),
+              ReplicaPids = lists:filter(fun(Pid) ->
+                                                 node(Pid) =/= Node
+                                         end, ReplicaPids0),
+              Replicas = lists:delete(Node, Replicas0),
+              Conf = maps:put(replica_pids, ReplicaPids,
+                              maps:put(replica_nodes, Replicas, Conf0)),
+              ra:pipeline_command({?MODULE, node()}, {stream_updated, From, Conf})
       end).
 
 phase_restart_replicas(#{replica_nodes := Replicas} = Conf) ->

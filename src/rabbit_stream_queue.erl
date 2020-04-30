@@ -422,24 +422,6 @@ add_replica(VHost, Name, Node) ->
 
 delete_replica(VHost, Name, Node) ->
     QName = rabbit_misc:r(VHost, queue, Name),
-    Fun = fun(Q) ->
-                  Conf = amqqueue:get_type_state(Q),
-                  Replicas = maps:get(replica_nodes, Conf),
-                  case lists:member(Node, Replicas) of
-                      true ->
-                          %% What if delete directory crashes?
-                          ok = osiris_replica:delete(Node, Conf),
-                          ReplicaPids0 = maps:get(replica_pids, Conf),
-                          ReplicaPids = lists:filter(fun(Pid) ->
-                                                             node(Pid) =/= Node
-                                                     end, ReplicaPids0),
-                          Conf1 = maps:put(replica_pids, ReplicaPids,
-                                           maps:put(replica_nodes, lists:delete(Node, Replicas), Conf)),
-                          amqqueue:set_type_state(Q, Conf1);
-                      false ->
-                          Q
-                  end
-          end,
     case rabbit_amqqueue:lookup(QName) of
         {ok, Q} when ?amqqueue_is_classic(Q) ->
             {error, classic_queue_not_supported};
@@ -450,13 +432,8 @@ delete_replica(VHost, Name, Node) ->
                 false ->
                     {error, node_not_running};
                 true ->
-                    case rabbit_misc:execute_mnesia_transaction(
-                           fun() -> rabbit_amqqueue:update(QName, Fun) end) of
-                        not_found ->
-                            {error, not_found};
-                        _ ->
-                            ok
-                    end
+                    #{name := StreamId} = amqqueue:get_type_state(Q),
+                    rabbit_stream_coordinator:delete_replica(StreamId, Node)
             end;
         E ->
             E
