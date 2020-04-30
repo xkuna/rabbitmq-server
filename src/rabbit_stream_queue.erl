@@ -403,20 +403,6 @@ set_retention_policy(Name, VHost, Policy) ->
 
 add_replica(VHost, Name, Node) ->
     QName = rabbit_misc:r(VHost, queue, Name),
-    Fun = fun(Q) ->
-                  Conf = amqqueue:get_type_state(Q),
-                  Replicas = maps:get(replica_nodes, Conf),
-                  case lists:member(Node, Replicas) of
-                      true ->
-                          Q;
-                      false ->
-                          {ok, Pid} = osiris:start_replica(Node, Conf),
-                          ReplicaPids = maps:get(replica_pids, Conf),
-                          Conf1 = maps:put(replica_pids, [Pid | ReplicaPids],
-                                           maps:put(replica_nodes, [Node | Replicas], Conf)),
-                          amqqueue:set_type_state(Q, Conf1)
-                  end
-          end,
     case rabbit_amqqueue:lookup(QName) of
         {ok, Q} when ?amqqueue_is_classic(Q) ->
             {error, classic_queue_not_supported};
@@ -427,13 +413,8 @@ add_replica(VHost, Name, Node) ->
                 false ->
                     {error, node_not_running};
                 true ->
-                    case rabbit_misc:execute_mnesia_transaction(
-                           fun() -> rabbit_amqqueue:update(QName, Fun) end) of
-                        not_found ->
-                            {error, not_found};
-                        _ ->
-                            ok
-                    end
+                    #{name := StreamId} = amqqueue:get_type_state(Q),
+                    rabbit_stream_coordinator:add_replica(StreamId, Node)
             end;
         E ->
             E
