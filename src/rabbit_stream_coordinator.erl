@@ -40,6 +40,8 @@
          phase_start_replica/3,
          phase_delete_replica/3]).
 
+-export([log_overview/1]).
+
 -define(STREAM_COORDINATOR_STARTUP, {stream_coordinator_startup, self()}).
 
 -record(?MODULE, {streams}).
@@ -173,7 +175,7 @@ apply(_Meta, {start_leader_election, StreamId, NewEpoch, Offsets},
       replica_nodes := Replicas} = Conf0 = maps:get(StreamId, Streams),
     Conf = maps:put(epoch, NewEpoch, Conf0),
     NewLeader = find_max_offset(Offsets),
-    NewConf = maps:put(replica_nodes, [Leader] ++ lists:delete(NewLeader, Replicas),
+    NewConf = maps:put(replica_nodes, lists:delete(NewLeader, Replicas ++ [Leader]),
                        maps:put(leader_node, NewLeader, Conf)),
     {State#?MODULE{streams = maps:put(StreamId, Conf, Streams)}, ok,
      [{aux, {phase, StreamId, phase_start_new_leader, [NewConf]}}]};
@@ -210,8 +212,18 @@ handle_aux(leader, _, {phase, StreamId, Fun, Args}, {Monitors, Streams}, LogStat
             {no_reply, {maps:put(Pid, StreamId, Monitors), maps:put(StreamId, {Fun, Args}, Streams)},
              LogState, [{monitor, process, aux, Pid}]}
     end;
-handle_aux(_, _, {down, _Pid, normal}, AuxState, LogState, _) ->
-    {no_reply, AuxState, LogState};
+handle_aux(_, _, {down, Pid, normal}, {Monitors0, Streams0}, LogState, _) ->
+    StreamId = maps:get(Pid, Monitors0),
+    Monitors = maps:remove(Pid, Monitors0),
+    %% Check if we're in the last phase so we can clean up the state
+    Streams = case maps:get(StreamId, Streams0) of
+                  {Phase, _} when Phase == phase_delete_cluster;
+                                  Phase == phase_repair_mnesia ->
+                      maps:remove(StreamId, Streams0);
+                  _ ->
+                      Streams0
+              end,
+    {no_reply, {Monitors, Streams}, LogState};
 handle_aux(_, _, {down, Pid, _}, {Monitors0, Streams}, LogState, _) ->
     %% The phase has failed, let's retry it
     StreamId = maps:get(Pid, Monitors0),
@@ -241,7 +253,10 @@ phase_start_replica(From, Node, #{replica_nodes := Replicas0,
                                  replica_pids := ReplicaPids0} = Conf0) ->
     spawn(
       fun() ->
-              {ok, Pid} = osiris:start_replica(Node, Conf0),
+              %% TODO start replica could fail and this enter an infinity loop.
+              %% We should retry but not block
+              %% TODO this could return {error, already_present} or {error, {already_started, _}}
+              {ok, Pid} = osiris_replica:start(Node, Conf0),
               ReplicaPids = [Pid | ReplicaPids0],
               Replicas = [Node | Replicas0],
               Conf = maps:put(replica_pids, ReplicaPids,
@@ -292,11 +307,11 @@ phase_start_new_leader(#{leader_node := Node} = Conf) ->
                                       {restart_replicas, maps:put(leader_pid, Pid, Conf)})
           end).
 
-phase_check_quorum(StreamId, #{replica_pids := Pids,
-                               epoch := Epoch}) ->
+phase_check_quorum(StreamId, #{epoch := Epoch,
+                               replica_nodes := Nodes} = Conf) ->
     spawn(fun() ->
-                  Offsets = find_replica_offsets(Pids),
-                  case is_quorum(length(Pids), length(Offsets)) of
+                  Offsets = find_replica_offsets(Conf),
+                  case is_quorum(length(Nodes), length(Offsets)) of
                       true ->
                           ra:pipeline_command({?MODULE, node()},
                                               {start_leader_election, StreamId, Epoch + 1, Offsets});
@@ -306,27 +321,46 @@ phase_check_quorum(StreamId, #{replica_pids := Pids,
                   end
           end).
 
-find_replica_offsets(Pids) ->
+find_replica_offsets(#{replica_nodes := Nodes,
+                       leader_node := Leader} = Conf) ->
     lists:foldl(
-      fun(Pid, Acc) ->
+      fun(Node, Acc) ->
               try
                   %% osiris_log:overview/1 needs the directory - last item of the list
                   %% TODO highest offset and epoch - ask JV
                   %% Node availability is what we need, not the reader process!
-                  {ok, Ctx} = gen:call(Pid, '$gen_call', get_reader_context, 5000),
-                  [{Pid, maps:get(committed_offset, Ctx)} | Acc]
+                  %% TODO ensure we dont' match the rpc:call response with {error, sthing}
+                  {_Range, Offsets} = rpc:call(Node, ?MODULE, log_overview, [Conf]),
+                  [{Node, select_highest_offset(Offsets)} | Acc]
               catch
                   _:_ ->
                       Acc
               end
-      end, [], Pids).
+      end, [], Nodes ++ [Leader]).
+
+select_highest_offset([]) ->
+    empty;
+select_highest_offset(Offsets) ->
+    lists:last(Offsets).
+
+log_overview(Config) ->
+    Dir = osiris_log:directory(Config),
+    osiris_log:overview(Dir).
 
 find_max_offset(Offsets) ->
-    [{Pid, _} | _] = lists:sort(fun({_, A}, {_, B}) ->
-                                        A >= B
-                                end, Offsets),
-    node(Pid).
+    [{Node, _} | _] = lists:sort(fun({_, {Ao, E}}, {_, {Bo, E}}) ->
+                                         Ao >= Bo;
+                                    ({_, {_, Ae}}, {_, {_, Be}}) ->
+                                         Ae >= Be;
+                                    ({_, empty}, _) ->
+                                         false;
+                                    (_, {_, empty}) ->
+                                         true
+                                 end, Offsets),
+    Node.
 
+is_quorum(1, 1) ->
+    true;
 is_quorum(NumReplicas, NumAlive) ->
     NumAlive >= ((NumReplicas div 2) + 1).
 
@@ -336,9 +370,10 @@ phase_repair_mnesia(From, new, Q) ->
                   gen_statem:reply(From, Reply)
           end).
 
-phase_repair_mnesia(update, #{reference := QName} = Conf) ->
+phase_repair_mnesia(update, #{reference := QName,
+                              leader_pid := LeaderPid} = Conf) ->
     Fun = fun (Q) ->
-                  amqqueue:set_type_state(Q, Conf)
+                  amqqueue:set_type_state(amqqueue:set_pid(Q, LeaderPid), Conf)
           end,
     spawn(fun() ->
                   rabbit_misc:execute_mnesia_transaction(
