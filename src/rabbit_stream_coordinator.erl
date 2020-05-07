@@ -132,14 +132,8 @@ apply(#{from := From}, {start_replica, StreamId, Node}, #?MODULE{streams = Strea
         undefined ->
             {State, '$ra_no_reply', [{reply, From, {error, not_found}}]};
         Conf ->
-            Replicas = maps:get(replica_nodes, Conf),
-            case lists:member(Node, Replicas) of
-                true ->
-                    {State, '$ra_no_reply', [{reply, From, ok}]};
-                false ->
-                    {State, '$ra_no_reply', [{aux, {phase, StreamId, phase_start_replica,
-                                                    [From, Node, Conf]}}]}
-            end
+            {State, '$ra_no_reply', [{aux, {phase, StreamId, phase_start_replica,
+                                            [From, Node, Conf]}}]}
     end;
 apply(#{from := From}, {delete_replica, StreamId, Node}, #?MODULE{streams = Streams} = State) ->
     case maps:get(StreamId, Streams, undefined) of
@@ -199,20 +193,25 @@ state_enter(_, _) ->
     [].
 
 init_aux(_Name) ->
-    {#{}, #{}}.
+    {#{}, #{}, #{}}.
 
 %% TODO ensure the dead writer is restarted as a replica at some point in time, increasing timeout?
-handle_aux(leader, _, {phase, StreamId, Fun, Args}, {Monitors, Streams}, LogState, _) ->
+handle_aux(leader, _, {phase, StreamId, Fun, Args} = Cmd, {Monitors, Streams, Pending}, LogState, _) ->
     case maps:get(StreamId, Streams, undefined) of
         {Fun, _} ->
-            {no_reply, {Monitors, Streams}, LogState};
+            {no_reply, {Monitors, Streams, Pending}, LogState};
+        {_, _} when Fun == phase_start_replica; Fun == phase_delete_replica ->
+            UpdateFun = fun(Cmds) -> Cmds ++ [Cmd] end,
+            {no_reply, {Monitors, Streams, maps:update_with(StreamId, UpdateFun, [Cmd], Pending)},
+             LogState};
         _Other ->
             %% TODO should we check order of phases?
             Pid = erlang:apply(?MODULE, Fun, Args),
-            {no_reply, {maps:put(Pid, StreamId, Monitors), maps:put(StreamId, {Fun, Args}, Streams)},
+            {no_reply,
+             {maps:put(Pid, StreamId, Monitors), maps:put(StreamId, {Fun, Args}, Streams), Pending},
              LogState, [{monitor, process, aux, Pid}]}
     end;
-handle_aux(_, _, {down, Pid, normal}, {Monitors0, Streams0}, LogState, _) ->
+handle_aux(RaftState, Type, {down, Pid, normal}, {Monitors0, Streams0, Pending}, LogState, MacState) ->
     StreamId = maps:get(Pid, Monitors0),
     Monitors = maps:remove(Pid, Monitors0),
     %% Check if we're in the last phase so we can clean up the state
@@ -223,14 +222,22 @@ handle_aux(_, _, {down, Pid, normal}, {Monitors0, Streams0}, LogState, _) ->
                   _ ->
                       Streams0
               end,
-    {no_reply, {Monitors, Streams}, LogState};
-handle_aux(_, _, {down, Pid, _}, {Monitors0, Streams}, LogState, _) ->
+    case maps:get(StreamId, Pending, []) of
+        [] ->
+            {no_reply, {Monitors, Streams, Pending}, LogState};
+        [{phase, StreamId, Fun, Args} | Cmds] ->
+            Pid = erlang:apply(?MODULE, Fun, Args),
+            {no_reply,
+             {maps:put(Pid, StreamId, Monitors), maps:put(StreamId, {Fun, Args}, Streams),
+              maps:put(StreamId, Cmds, Pending)}, LogState, [{monitor, process, aux, Pid}]}
+    end;
+handle_aux(_, _, {down, Pid, _}, {Monitors0, Streams, Pending}, LogState, _) ->
     %% The phase has failed, let's retry it
     StreamId = maps:get(Pid, Monitors0),
     {Fun, Args} = maps:get(StreamId, Streams),
     NewPid = erlang:apply(?MODULE, Fun, Args),
     Monitors = maps:put(NewPid, StreamId, maps:remove(Pid, Monitors0)),
-    {no_reply, {Monitors, Streams}, LogState};
+    {no_reply, {Monitors, Streams, Pending}, LogState};
 handle_aux(_, _, _, AuxState, LogState, _) ->
     {no_reply, AuxState, LogState}.
 
@@ -256,12 +263,26 @@ phase_start_replica(From, Node, #{replica_nodes := Replicas0,
               %% TODO start replica could fail and this enter an infinity loop.
               %% We should retry but not block
               %% TODO this could return {error, already_present} or {error, {already_started, _}}
-              {ok, Pid} = osiris_replica:start(Node, Conf0),
-              ReplicaPids = [Pid | ReplicaPids0],
-              Replicas = [Node | Replicas0],
-              Conf = maps:put(replica_pids, ReplicaPids,
-                             maps:put(replica_nodes, Replicas, Conf0)),
-              ra:pipeline_command({?MODULE, node()}, {stream_updated, From, Conf})
+              case osiris_replica:start(Node, Conf0) of
+                  {ok, Pid} ->
+                      ReplicaPids = [Pid | ReplicaPids0],
+                      Replicas = [Node | Replicas0],
+                      Conf = maps:put(replica_pids, ReplicaPids,
+                                      maps:put(replica_nodes, Replicas, Conf0)),
+                      ra:pipeline_command({?MODULE, node()}, {stream_updated, From, Conf});
+                  {error, already_present} ->
+                      gen_statem:reply(From, ok);
+                  {error, {already_started, Pid}} ->
+                      %% The Pid might have changed, let's update it
+                      ReplicaPids = [Pid | lists:filter(fun(P) ->
+                                                                node(P) =/= Node
+                                                        end, ReplicaPids0)],
+                      Conf = maps:put(replica_pids, ReplicaPids, Conf0),
+                      ra:pipeline_command({?MODULE, node()}, {stream_updated, From, Conf});
+                  {error, _} ->
+                      %% TODO what to do?
+                      ok
+              end
       end).
 
 phase_delete_replica(From, Node, #{replica_nodes := Replicas0,
@@ -376,8 +397,17 @@ phase_repair_mnesia(update, #{reference := QName,
                   amqqueue:set_type_state(amqqueue:set_pid(Q, LeaderPid), Conf)
           end,
     spawn(fun() ->
-                  rabbit_misc:execute_mnesia_transaction(
-                    fun() -> rabbit_amqqueue:update(QName, Fun) end)
+                  case rabbit_misc:execute_mnesia_transaction(
+                         fun() ->
+                                 rabbit_amqqueue:update(QName, Fun)
+                         end) of
+                      not_found ->
+                          %% This can happen during recovery
+                          [Q] = mnesia:dirty_read(rabbit_durable_queue, QName),
+                          {ok, _} = rabbit_amqqueue:ensure_rabbit_queue_record_is_initialized(Fun(Q));
+                      V ->
+                          V
+                  end
           end).
 
 phase_start_cluster(From, #{name := StreamId} = Conf) ->

@@ -460,8 +460,8 @@ make_stream_conf(Node, Q) ->
 format_osiris_event(Evt, QRef) ->
     {'$gen_cast', {queue_event, QRef, Evt}}.
 
-max_age(Age1, Age2) ->
-    min(rabbit_amqqueue:check_max_age(Age1), rabbit_amqqueue:check_max_age(Age2)).
+%% max_age(Age1, Age2) ->
+%%     min(rabbit_amqqueue:check_max_age(Age1), rabbit_amqqueue:check_max_age(Age2)).
 
 check_invalid_arguments(QueueName, Args) ->
     Keys = [<<"x-expires">>, <<"x-message-ttl">>,
@@ -475,83 +475,17 @@ queue_name(#resource{virtual_host = VHost, name = Name}) ->
     osiris_util:to_base64uri(erlang:binary_to_list(<<VHost/binary, "_", Name/binary, "_",
                                                      Timestamp/binary>>)).
 
-recover(Q0) ->
-    Node = node(),
-    Conf0 = amqqueue:get_type_state(Q0),
-    QName = amqqueue:get_name(Q0),
-    Pid = amqqueue:get_pid(Q0),
-    case node(Pid) of
-        Node ->
-            Conf1 = maps:put(replica_pids, [], Conf0),
-            {ok, LeaderPid} = osiris_writer:start(Conf1),
-            Conf2 = maps:put(leader_pid, LeaderPid, Conf1),
-            Q1 = amqqueue:set_pid(amqqueue:set_type_state(Q0, Conf2), LeaderPid),
-            {ok, _} = rabbit_amqqueue:ensure_rabbit_queue_record_is_initialized(Q1),
-            ReplicaPids = restart_replicas_on_nodes(Conf2),
-            {ok, update_replicas(QName, ReplicaPids)};
-        _ ->
-            restart_replica(Q0, Node, Conf0)
-    end.
-
-restart_replica(Q, Node, Conf) ->
-    case rabbit_misc:is_process_alive(maps:get(leader_pid, Conf)) of
+recover(Q) ->
+    #{replica_nodes := Nodes,
+      name := StreamId} = amqqueue:get_type_state(Q),
+    %% The leader is restarted by the coordinator, but replicas are not being monitored
+    case lists:member(node(), Nodes) of
         true ->
-            case osiris:start_replica(Node, Conf) of
-                {ok, ReplicaPid} ->
-                    {ok, update_replicas(amqqueue:get_name(Q), [ReplicaPid])};
-                {error, already_present} ->
-                    {ok, Q};
-                {error, {already_started, _}} ->
-                    {ok, Q};
-                Error ->
-                    rabbit_log:warning("Error starting stream ~p replica: ~p",
-                                       [maps:get(name, Conf), Error]),
-                    {error, Q}
-            end;
+            rabbit_stream_coordinator:add_replica(StreamId, node());
         false ->
-            rabbit_log:debug("Stream ~p writer is down, the replica on this node"
-                             " will be started by the writer", [maps:get(name, Conf)]),
-            {error, Q}
-    end.
-
-restart_replicas_on_nodes(Conf) ->
-    lists:foldl(
-      fun(Replica, Pids) ->
-              try
-                  case osiris:restart_replica(Replica, Conf) of
-                      {ok, Pid} ->
-                          [Pid | Pids];
-                      {error, already_present} ->
-                          Pids;
-                      {error, {already_started, _}} ->
-                          Pids;
-                      Error ->
-                          rabbit_log:warning("Error starting stream ~p replica on node ~p: ~p",
-                                             [maps:get(name, Conf), Replica, Error]),
-                          Pids
-                  end
-              catch
-                  _:_ ->
-                      %% Node is not yet up, this is normal
-                      Pids
-              end
-      end, [], maps:get(replica_nodes, Conf)).
-
-update_replicas(QName, ReplicaPids0) ->
-    Fun = fun (Q) ->
-                  Conf = amqqueue:get_type_state(Q),
-                  ReplicaPids = filter_alive(maps:get(replica_pids, Conf)) ++ ReplicaPids0,
-                  amqqueue:set_type_state(Q, maps:put(replica_pids, ReplicaPids, Conf))
-          end,
-    rabbit_misc:execute_mnesia_transaction(
-      fun() -> rabbit_amqqueue:update(QName, Fun) end).
-
-filter_alive(Pids) ->
-    lists:filter(fun(Pid) when node(Pid) == node() ->
-                         rabbit_misc:is_process_alive(Pid);
-                    (_) ->
-                         true
-                 end, Pids).
+            ok
+    end,
+    {ok, Q}.
 
 check_queue_exists_in_local_node(Q) ->
     Conf = amqqueue:get_type_state(Q),
