@@ -810,7 +810,6 @@ usage(Name) when is_atom(Name) ->
 messages_ready(#?MODULE{messages = M,
                         prefix_msgs = {RCnt, _R, PCnt, _P},
                         returns = R}) ->
-
     %% prefix messages will rarely have anything in them during normal
     %% operations so length/1 is fine here
     maps:size(M) + lqueue:len(R) + RCnt + PCnt.

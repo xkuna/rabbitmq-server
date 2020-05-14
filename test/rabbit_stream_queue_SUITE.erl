@@ -81,11 +81,7 @@ all_tests() ->
 
 init_per_suite(Config0) ->
     rabbit_ct_helpers:log_environment(),
-    Config = rabbit_ct_helpers:merge_app_env(
-               Config0, {rabbit, []}),
-    rabbit_ct_helpers:run_setup_steps(
-      Config,
-      [fun rabbit_ct_broker_helpers:enable_dist_proxy_manager/1]).
+    rabbit_ct_helpers:run_setup_steps(Config0).
 
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).

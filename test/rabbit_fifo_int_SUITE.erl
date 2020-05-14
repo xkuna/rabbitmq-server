@@ -102,7 +102,8 @@ basics(Config) ->
                           {ok, FState4,
                            [{deliver, C, true,
                              [{_Qname, _QRef, MsgId, _SomBool, _Msg}]}]} ->
-                              rabbit_fifo_client:settle(C, [MsgId], FState4)
+                              {S, _A} = rabbit_fifo_client:settle(C, [MsgId], FState4),
+                              S
                       end
               after 5000 ->
                         exit(await_msg_timeout)
@@ -129,7 +130,7 @@ basics(Config) ->
             case rabbit_fifo_client:handle_ra_event(Frm, E, FState6b) of
                 {ok, FState7, [{deliver, Ctag, true,
                                 [{_, _, Mid, _, two}]}]} ->
-                    _S = rabbit_fifo_client:return(Ctag, [Mid], FState7),
+                    {_, _} = rabbit_fifo_client:return(Ctag, [Mid], FState7),
                     ok
             end
     after 2000 ->
@@ -325,9 +326,9 @@ resends_after_lost_applied(Config) ->
     % send another message
     {ok, F4} = rabbit_fifo_client:enqueue(msg3, F3),
     {_, _, F5} = process_ra_events(receive_ra_events(1, 0), F4),
-    {ok, _, {_, _, _, _, msg1}, F5} = rabbit_fifo_client:dequeue(<<"tag">>, settled, F4),
-    {ok, _, {_, _, _, _, msg2}, F6} = rabbit_fifo_client:dequeue(<<"tag">>, settled, F5),
-    {ok, _, {_, _, _, _, msg3}, _F7} = rabbit_fifo_client:dequeue(<<"tag">>, settled, F6),
+    {ok, _, {_, _, _, _, msg1}, F6} = rabbit_fifo_client:dequeue(<<"tag">>, settled, F5),
+    {ok, _, {_, _, _, _, msg2}, F7} = rabbit_fifo_client:dequeue(<<"tag">>, settled, F6),
+    {ok, _, {_, _, _, _, msg3}, _F8} = rabbit_fifo_client:dequeue(<<"tag">>, settled, F7),
     ra:stop_server(ServerId),
     ok.
 
@@ -377,7 +378,7 @@ discard(Config) ->
     F0 = rabbit_fifo_client:init(ClusterName, [ServerId]),
     {ok, F1} = rabbit_fifo_client:checkout(<<"tag">>, 10, #{}, F0),
     {ok, F2} = rabbit_fifo_client:enqueue(msg1, F1),
-    F3 = discard_next_delivery(F2, 500),
+    F3 = discard_next_delivery(F2, 5000),
     {empty, _F4} = rabbit_fifo_client:dequeue(<<"tag1">>, settled, F3),
     receive
         {dead_letter, Letters} ->
@@ -396,10 +397,10 @@ cancel_checkout(Config) ->
     ok = start_cluster(ClusterName, [ServerId]),
     F0 = rabbit_fifo_client:init(ClusterName, [ServerId], 4),
     {ok, F1} = rabbit_fifo_client:enqueue(m1, F0),
-    {ok, F2} = rabbit_fifo_client:checkout(<<"tag">>, 10, undefined, F1),
+    {ok, F2} = rabbit_fifo_client:checkout(<<"tag">>, 10, #{}, F1),
     {_, _, F3} = process_ra_events(receive_ra_events(1, 1), F2, [], [], fun (_, S) -> S end),
     {ok, F4} = rabbit_fifo_client:cancel_checkout(<<"tag">>, F3),
-    F5 = rabbit_fifo_client:return(<<"tag">>, [0], F4),
+    {F5, _} = rabbit_fifo_client:return(<<"tag">>, [0], F4),
     {ok, _, {_, _, _, _, m1}, F5} = rabbit_fifo_client:dequeue(<<"d1">>, settled, F5),
     ok.
 
@@ -419,13 +420,13 @@ credit(Config) ->
                                        (D, _) -> error({unexpected_delivery, D})
                                    end),
     %% provide some credit
-    {ok, F6} = rabbit_fifo_client:credit(<<"tag">>, 1, false, F5),
-    {[{_, {_, m1}}], [{send_credit_reply, _}], F7} =
+    F6 = rabbit_fifo_client:credit(<<"tag">>, 1, false, F5),
+    {[{_, _, _, _, m1}], [{send_credit_reply, _}], F7} =
         process_ra_events(receive_ra_events(1, 1), F6),
 
     %% credit and drain
-    {ok, F8} = rabbit_fifo_client:credit(<<"tag">>, 4, true, F7),
-    {[{_, {_, m2}}], [{send_credit_reply, _}, {send_drained, _}], F9} =
+    F8 = rabbit_fifo_client:credit(<<"tag">>, 4, true, F7),
+    {[{_, _, _, _, m2}], [{send_credit_reply, _}, {send_drained, _}], F9} =
         process_ra_events(receive_ra_events(1, 1), F8),
     flush(),
 
@@ -438,9 +439,8 @@ credit(Config) ->
                                         (D, _) -> error({unexpected_delivery, D})
                                     end),
     %% credit again and receive the last message
-    {ok, F12} = rabbit_fifo_client:credit(<<"tag">>, 10, false, F11),
-    {[{_, {_, m3}}], [{send_credit_reply, _}], _} =
-        process_ra_events(receive_ra_events(1, 1), F12),
+    F12 = rabbit_fifo_client:credit(<<"tag">>, 10, false, F11),
+    {[{_, _, _, _, m3}], _, _} = process_ra_events(receive_ra_events(1, 1), F12),
     ok.
 
 untracked_enqueue(Config) ->
@@ -514,8 +514,8 @@ dequeue(Config) ->
     {ok, _, {_, _, 0, _, msg1}, F3} = rabbit_fifo_client:dequeue(Tag, settled, F2),
     {ok, F4_} = rabbit_fifo_client:enqueue(msg2, F3),
     {_, _, F4} = process_ra_events(receive_ra_events(1, 0), F4_),
-    {ok, {{MsgId, {_, msg2}}, _}, F5} = rabbit_fifo_client:dequeue(Tag, unsettled, F4),
-    {ok, _F6} = rabbit_fifo_client:settle(Tag, [MsgId], F5),
+    {ok, _, {_, _, MsgId, _, msg2}, F5} = rabbit_fifo_client:dequeue(Tag, unsettled, F4),
+    {_F6, _A} = rabbit_fifo_client:settle(Tag, [MsgId], F5),
     ra:stop_server(ServerId),
     ok.
 
@@ -568,9 +568,10 @@ receive_ra_events(Acc) ->
     end.
 
 process_ra_events(Events, State) ->
-    DeliveryFun = fun ({delivery, Tag, Msgs}, S) ->
+    DeliveryFun = fun ({deliver, _, Tag, Msgs}, S) ->
                           MsgIds = [element(1, M) || M <- Msgs],
-                          rabbit_fifo_client:settle(Tag, MsgIds, S)
+                          {S0, _} = rabbit_fifo_client:settle(Tag, MsgIds, S),
+                          S0
                   end,
     process_ra_events(Events, State, [], [], DeliveryFun).
 
@@ -578,45 +579,44 @@ process_ra_events([], State0, Acc, Actions0, _DeliveryFun) ->
     {Acc, Actions0, State0};
 process_ra_events([{ra_event, From, Evt} | Events], State0, Acc, Actions0, DeliveryFun) ->
     case rabbit_fifo_client:handle_ra_event(From, Evt, State0) of
-        {internal, _, Actions,  State} ->
-            process_ra_events(Events, State, Acc, Actions0 ++ Actions, DeliveryFun);
-        {{delivery, _Tag, Msgs} = Del, State1} ->
-            State = DeliveryFun(Del, State1),
-            process_ra_events(Events, State, Acc ++ Msgs, Actions0, DeliveryFun);
+        {ok, State1, Actions1} ->
+            {Msgs, Actions, State} =
+                lists:foldl(
+                  fun ({deliver, _, _, Msgs} = Del, {M, A, S}) ->
+                          {M ++ Msgs, A, DeliveryFun(Del, S)};
+                      (Ac, {M, A, S}) ->
+                          {M, A ++ [Ac], S}
+                  end, {Acc, [], State1}, Actions1),
+            process_ra_events(Events, State, Msgs, Actions0 ++ Actions, DeliveryFun);
         eol ->
             eol
     end.
 
 discard_next_delivery(State0, Wait) ->
-    element(3,
-            process_ra_events0(State0, [], [], Wait,
-                               fun ({deliver, Tag, _, Msgs}, S) ->
-                                       MsgIds = [element(3, M) || M <- Msgs],
-                                       ct:pal("discarding ~w", [MsgIds]),
-                                       rabbit_fifo_client:discard(Tag, MsgIds, S)
-                               end)).
+    receive
+        {ra_event, _, {machine, {delivery, _, _}}} = Evt ->
+            element(3, process_ra_events([Evt], State0, [], [],
+                                         fun ({deliver, Tag, _, Msgs}, S) ->
+                                                 MsgIds = [element(3, M) || M <- Msgs],
+                                                 {S0, _} = rabbit_fifo_client:discard(Tag, MsgIds, S),
+                                                 S0
+                                         end))
+    after Wait ->
+            State0
+    end.
 
 return_next_delivery(State0, Wait) ->
-    element(3,
-            process_ra_events0(State0, [], [], Wait,
-                               fun ({deliver, Tag, _, Msgs}, S) ->
-                                       MsgIds = [element(3, M) || M <- Msgs],
-                                       rabbit_fifo_client:return(Tag, MsgIds, S)
-                               end)).
-    % receive
-    %     {ra_event, From, Evt} ->
-    %         case rabbit_fifo_client:handle_ra_event(From, Evt, State0) of
-    %             {internal, _, _, State} ->
-    %                 return_next_delivery(State, Wait);
-    %             {{delivery, Tag, Msgs}, State1} ->
-    %                 MsgIds = [element(1, M) || M <- Msgs],
-    %                 {ok, State} = rabbit_fifo_client:return(Tag, MsgIds,
-    %                                                     State1),
-    %                 State
-    %         end
-    % after Wait ->
-    %           State0
-    % end.
+    receive
+        {ra_event, _, {machine, {delivery, _, _}}} = Evt ->
+            element(3, process_ra_events([Evt], State0, [], [],
+                                         fun ({deliver, Tag, _, Msgs}, S) ->
+                                                 MsgIds = [element(3, M) || M <- Msgs],
+                                                 {S0, _} = rabbit_fifo_client:return(Tag, MsgIds, S),
+                                                 S0
+                                         end))
+    after Wait ->
+              State0
+    end.
 
 validate_process_down(Name, 0) ->
     exit({process_not_down, Name});

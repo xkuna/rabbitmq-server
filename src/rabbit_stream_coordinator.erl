@@ -211,7 +211,7 @@ handle_aux(leader, _, {phase, StreamId, Fun, Args} = Cmd, {Monitors, Streams, Pe
              {maps:put(Pid, StreamId, Monitors), maps:put(StreamId, {Fun, Args}, Streams), Pending},
              LogState, [{monitor, process, aux, Pid}]}
     end;
-handle_aux(RaftState, Type, {down, Pid, normal}, {Monitors0, Streams0, Pending}, LogState, MacState) ->
+handle_aux(_, _, {down, Pid, normal}, {Monitors0, Streams0, Pending}, LogState, _) ->
     StreamId = maps:get(Pid, Monitors0),
     Monitors = maps:remove(Pid, Monitors0),
     %% Check if we're in the last phase so we can clean up the state

@@ -738,7 +738,7 @@ handle_delivery(Leader, {delivery, Tag, [{FstId, _} | _] = IdMsgs},
                 [] ->
                     {ok, State0, []};
                 IdMsgs2 ->
-                    handle_delivery(From, {delivery, Tag, IdMsgs2}, State0)
+                    handle_delivery(Leader, {delivery, Tag, IdMsgs2}, State0)
             end;
         C when FstId =:= 0 ->
             % the very first delivery
