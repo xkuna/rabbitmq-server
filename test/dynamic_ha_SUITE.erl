@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(dynamic_ha_SUITE).
@@ -64,7 +64,8 @@ groups() ->
               slave_recovers_after_vhost_down_and_up,
               master_migrates_on_vhost_down,
               slave_recovers_after_vhost_down_and_master_migrated,
-              queue_survive_adding_dead_vhost_mirror
+              queue_survive_adding_dead_vhost_mirror,
+              dynamic_mirroring
             ]},
           {cluster_size_3, [], [
               change_policy,
@@ -74,11 +75,8 @@ groups() ->
               queue_survive_adding_dead_vhost_mirror,
               rebalance_all,
               rebalance_exactly,
-              rebalance_nodes
-              % FIXME: Re-enable those tests when the know issues are
-              % fixed.
-              % failing_random_policies,
-              % random_policy
+              rebalance_nodes,
+              rebalance_multiple_blocked
             ]}
         ]}
     ].
@@ -127,8 +125,67 @@ end_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_finished(Config1, Testcase).
 
 %% -------------------------------------------------------------------
-%% Testcases.
+%% Test Cases
 %% -------------------------------------------------------------------
+
+dynamic_mirroring(Config) ->
+    passed = rabbit_ct_broker_helpers:rpc(Config, 0,
+      ?MODULE, dynamic_mirroring1, [Config]).
+
+dynamic_mirroring1(_Config) ->
+    %% Just unit tests of the node selection logic, see multi node
+    %% tests for the rest...
+    Test = fun ({NewM, NewSs, ExtraSs}, Policy, Params,
+                {MNode, SNodes, SSNodes}, All) ->
+                   {ok, M} = rabbit_mirror_queue_misc:module(Policy),
+                   {NewM, NewSs0} = M:suggested_queue_nodes(
+                                      Params, MNode, SNodes, SSNodes, All),
+                   NewSs1 = lists:sort(NewSs0),
+                   case dm_list_match(NewSs, NewSs1, ExtraSs) of
+                       ok    -> ok;
+                       error -> exit({no_match, NewSs, NewSs1, ExtraSs})
+                   end
+           end,
+
+    Test({a,[b,c],0},<<"all">>,'_',{a,[],   []},   [a,b,c]),
+    Test({a,[b,c],0},<<"all">>,'_',{a,[b,c],[b,c]},[a,b,c]),
+    Test({a,[b,c],0},<<"all">>,'_',{a,[d],  [d]},  [a,b,c]),
+
+    N = fun (Atoms) -> [list_to_binary(atom_to_list(A)) || A <- Atoms] end,
+
+    %% Add a node
+    Test({a,[b,c],0},<<"nodes">>,N([a,b,c]),{a,[b],[b]},[a,b,c,d]),
+    Test({b,[a,c],0},<<"nodes">>,N([a,b,c]),{b,[a],[a]},[a,b,c,d]),
+    %% Add two nodes and drop one
+    Test({a,[b,c],0},<<"nodes">>,N([a,b,c]),{a,[d],[d]},[a,b,c,d]),
+    %% Don't try to include nodes that are not running
+    Test({a,[b],  0},<<"nodes">>,N([a,b,f]),{a,[b],[b]},[a,b,c,d]),
+    %% If we can't find any of the nodes listed then just keep the master
+    Test({a,[],   0},<<"nodes">>,N([f,g,h]),{a,[b],[b]},[a,b,c,d]),
+    %% And once that's happened, still keep the master even when not listed,
+    %% if nothing is synced
+    Test({a,[b,c],0},<<"nodes">>,N([b,c]),  {a,[], []}, [a,b,c,d]),
+    Test({a,[b,c],0},<<"nodes">>,N([b,c]),  {a,[b],[]}, [a,b,c,d]),
+    %% But if something is synced we can lose the master - but make
+    %% sure we pick the new master from the nodes which are synced!
+    Test({b,[c],  0},<<"nodes">>,N([b,c]),  {a,[b],[b]},[a,b,c,d]),
+    Test({b,[c],  0},<<"nodes">>,N([c,b]),  {a,[b],[b]},[a,b,c,d]),
+
+    Test({a,[],   1},<<"exactly">>,2,{a,[],   []},   [a,b,c,d]),
+    Test({a,[],   2},<<"exactly">>,3,{a,[],   []},   [a,b,c,d]),
+    Test({a,[c],  0},<<"exactly">>,2,{a,[c],  [c]},  [a,b,c,d]),
+    Test({a,[c],  1},<<"exactly">>,3,{a,[c],  [c]},  [a,b,c,d]),
+    Test({a,[c],  0},<<"exactly">>,2,{a,[c,d],[c,d]},[a,b,c,d]),
+    Test({a,[c,d],0},<<"exactly">>,3,{a,[c,d],[c,d]},[a,b,c,d]),
+
+    passed.
+
+%% Does the first list match the second where the second is required
+%% to have exactly Extra superfluous items?
+dm_list_match([],     [],      0)     -> ok;
+dm_list_match(_,      [],     _Extra) -> error;
+dm_list_match([H|T1], [H |T2], Extra) -> dm_list_match(T1, T2, Extra);
+dm_list_match(L1,     [_H|T2], Extra) -> dm_list_match(L1, T2, Extra - 1).
 
 change_policy(Config) ->
     [A, B, C] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
@@ -456,7 +513,7 @@ master_migrates_on_vhost_down(Config) ->
     ACh = rabbit_ct_client_helpers:open_channel(Config, A),
     QName = <<"master_migrates_on_vhost_down-q">>,
     amqp_channel:call(ACh, #'queue.declare'{queue = QName}),
-    timer:sleep(200),
+    timer:sleep(500),
     assert_slaves(A, QName, {A, [B]}, [{A, []}]),
 
     %% Crash vhost on the node hosting queue master
@@ -470,7 +527,7 @@ slave_recovers_after_vhost_down_and_master_migrated(Config) ->
     ACh = rabbit_ct_client_helpers:open_channel(Config, A),
     QName = <<"slave_recovers_after_vhost_down_and_master_migrated-q">>,
     amqp_channel:call(ACh, #'queue.declare'{queue = QName}),
-    timer:sleep(200),
+    timer:sleep(500),
     assert_slaves(A, QName, {A, [B]}, [{A, []}]),
     %% Crash vhost on the node hosting queue master
     rabbit_ct_broker_helpers:force_vhost_failure(Config, A, <<"/">>),
@@ -516,8 +573,9 @@ promote_slave_after_standalone_restart(Config) ->
     rabbit_ct_client_helpers:publish(Ch, ?QNAME, 15),
     rabbit_ct_client_helpers:close_channel(Ch),
 
-    timer:sleep(500),
-    15 = proplists:get_value(messages, find_queue(?QNAME, A)),
+    rabbit_ct_helpers:await_condition(fun() ->
+                                        15 =:= proplists:get_value(messages, find_queue(?QNAME, A))
+                                      end, 60000),
 
     rabbit_ct_broker_helpers:stop_node(Config, C),
     rabbit_ct_broker_helpers:stop_node(Config, B),
@@ -528,7 +586,9 @@ promote_slave_after_standalone_restart(Config) ->
     forget_cluster_node(Config, B, A),
 
     ok = rabbit_ct_broker_helpers:start_node(Config, B),
-    15 = proplists:get_value(messages, find_queue(?QNAME, B)),
+    rabbit_ct_helpers:await_condition(fun() ->
+                                        15 =:= proplists:get_value(messages, find_queue(?QNAME, B))
+                                      end, 60000),
     ok = rabbit_ct_broker_helpers:stop_node(Config, B),
 
     %% Restart the other
@@ -570,11 +630,15 @@ rebalance_all(Config) ->
     {ok, Summary} = rpc:call(A, rabbit_amqqueue, rebalance, [classic, ".*", ".*"]),
 
     %% Check that we have at most 2 queues per node
-    ?assert(lists:all(fun(NodeData) ->
+    Condition1 = fun() ->
+                     lists:all(fun(NodeData) ->
                               lists:all(fun({_, V}) when is_integer(V) -> V =< 2;
                                            (_) -> true end,
                                         NodeData)
-                      end, Summary)),
+                      end, Summary)
+                 end,
+    rabbit_ct_helpers:await_condition(Condition1, 60000),
+
     %% Check that Q1 and Q2 haven't moved
     assert_slaves(A, Q1, {A, [B, C]}, [{A, []}, {A, [B]}, {A, [C]}]),
     assert_slaves(A, Q2, {A, [B, C]}, [{A, []}, {A, [B]}, {A, [C]}]),
@@ -619,14 +683,21 @@ rebalance_exactly(Config) ->
     {ok, Summary} = rpc:call(A, rabbit_amqqueue, rebalance, [classic, ".*", ".*"]),
 
     %% Check that we have at most 2 queues per node
-    ?assert(lists:all(fun(NodeData) ->
-                              lists:all(fun({_, V}) when is_integer(V) -> V =< 2;
-                                           (_) -> true end,
-                                        NodeData)
-                      end, Summary)),
+    Condition1 = fun() ->
+                     lists:all(fun(NodeData) ->
+                                   lists:all(fun({_, V}) when is_integer(V) -> V =< 2;
+                                                (_) -> true end,
+                                             NodeData)
+                               end, Summary)
+                 end,
+    rabbit_ct_helpers:await_condition(Condition1, 60000),
+
     %% Check that Q1 and Q2 haven't moved
-    ?assertEqual(A, node(proplists:get_value(pid, find_queue(Q1, A)))),
-    ?assertEqual(A, node(proplists:get_value(pid, find_queue(Q2, A)))),
+    Condition2 = fun () ->
+                    A =:= node(proplists:get_value(pid, find_queue(Q1, A))) andalso
+                    A =:= node(proplists:get_value(pid, find_queue(Q2, A)))
+                 end,
+    rabbit_ct_helpers:await_condition(Condition2, 40000),
 
     ok.
 
@@ -689,6 +760,39 @@ rebalance_nodes(Config) ->
     ?assertEqual(A, node(proplists:get_value(pid, find_queue(Q2, A)))),
 
     ok.
+
+rebalance_multiple_blocked(Config) ->
+    [A, _, _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    ACh = rabbit_ct_client_helpers:open_channel(Config, A),
+    Q1 = <<"q1">>,
+    Q2 = <<"q2">>,
+    Q3 = <<"q3">>,
+    Q4 = <<"q4">>,
+    Q5 = <<"q5">>,
+    amqp_channel:call(ACh, #'queue.declare'{queue = Q1}),
+    amqp_channel:call(ACh, #'queue.declare'{queue = Q2}),
+    amqp_channel:call(ACh, #'queue.declare'{queue = Q3}),
+    amqp_channel:call(ACh, #'queue.declare'{queue = Q4}),
+    amqp_channel:call(ACh, #'queue.declare'{queue = Q5}),
+    ?assertEqual(A, node(proplists:get_value(pid, find_queue(Q1, A)))),
+    ?assertEqual(A, node(proplists:get_value(pid, find_queue(Q2, A)))),
+    ?assertEqual(A, node(proplists:get_value(pid, find_queue(Q3, A)))),
+    ?assertEqual(A, node(proplists:get_value(pid, find_queue(Q4, A)))),
+    ?assertEqual(A, node(proplists:get_value(pid, find_queue(Q5, A)))),
+    ?assert(rabbit_ct_broker_helpers:rpc(
+              Config, A,
+              ?MODULE, rebalance_multiple_blocked1, [Config])).
+
+rebalance_multiple_blocked1(_) ->
+    Parent = self(),
+    Fun = fun() ->
+                  Parent ! rabbit_amqqueue:rebalance(classic, ".*", ".*")
+          end,
+    spawn(Fun),
+    spawn(Fun),
+    Rets = [receive Ret1 -> Ret1 end,
+            receive Ret2 -> Ret2 end],
+    lists:member({error, rebalance_in_progress}, Rets).
 
 %%----------------------------------------------------------------------------
 

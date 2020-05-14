@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2011-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2011-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(list_queues_online_and_offline_SUITE).
@@ -84,6 +84,11 @@ list_queues_online_and_offline(Config) ->
     #'queue.declare_ok'{} = amqp_channel:call(BCh, #'queue.declare'{queue = <<"q_b_2">>, durable = true}),
 
     rabbit_ct_broker_helpers:rabbitmqctl(Config, B, ["stop"]),
+
+    rabbit_ct_helpers:await_condition(
+      fun() ->
+              [A] == rpc:call(A, rabbit_mnesia, cluster_nodes, [running])
+      end, 60000),
 
     GotUp = lists:sort(rabbit_ct_broker_helpers:rabbitmqctl_list(Config, A,
         ["list_queues", "--online", "name", "--no-table-headers"])),

@@ -20,45 +20,50 @@ setup(Context) ->
 
     %% TODO: Check if directories/files are inside Mnesia dir.
 
-    %% TODO: Support glob patterns & directories in RABBITMQ_CONFIG_FILE.
-    %% TODO: Always try parsing of both erlang and cuttlefish formats.
-
     ok = set_default_config(),
 
+    AdditionalConfigFiles = find_additional_config_files(Context),
     AdvancedConfigFile = find_actual_advanced_config_file(Context),
     State = case find_actual_main_config_file(Context) of
                 {MainConfigFile, erlang} ->
-                    Config = load_erlang_term_based_config_file(
-                               MainConfigFile),
+                    Config = load_cuttlefish_config_file(Context,
+                                                         AdditionalConfigFiles,
+                                                         MainConfigFile),
                     Apps = [App || {App, _} <- Config],
                     decrypt_config(Apps),
-                    #{config_type => erlang,
-                      config_files => [MainConfigFile],
-                      config_advanced_file => undefined};
+                    #{config_files => AdditionalConfigFiles,
+                      config_advanced_file => MainConfigFile};
                 {MainConfigFile, cuttlefish} ->
-                    ConfigFiles = [MainConfigFile],
+                    ConfigFiles = [MainConfigFile | AdditionalConfigFiles],
                     Config = load_cuttlefish_config_file(Context,
                                                          ConfigFiles,
                                                          AdvancedConfigFile),
                     Apps = [App || {App, _} <- Config],
                     decrypt_config(Apps),
-                    #{config_type => cuttlefish,
-                      config_files => ConfigFiles,
+                    #{config_files => ConfigFiles,
+                      config_advanced_file => AdvancedConfigFile};
+                undefined when AdditionalConfigFiles =/= [] ->
+                    ConfigFiles = AdditionalConfigFiles,
+                    Config = load_cuttlefish_config_file(Context,
+                                                         ConfigFiles,
+                                                         AdvancedConfigFile),
+                    Apps = [App || {App, _} <- Config],
+                    decrypt_config(Apps),
+                    #{config_files => ConfigFiles,
                       config_advanced_file => AdvancedConfigFile};
                 undefined when AdvancedConfigFile =/= undefined ->
                     rabbit_log_prelaunch:warning(
                       "Using RABBITMQ_ADVANCED_CONFIG_FILE: ~s",
                       [AdvancedConfigFile]),
-                    Config = load_erlang_term_based_config_file(
-                               AdvancedConfigFile),
+                    Config = load_cuttlefish_config_file(Context,
+                                                         AdditionalConfigFiles,
+                                                         AdvancedConfigFile),
                     Apps = [App || {App, _} <- Config],
                     decrypt_config(Apps),
-                    #{config_type => erlang,
-                      config_files => [AdvancedConfigFile],
+                    #{config_files => AdditionalConfigFiles,
                       config_advanced_file => AdvancedConfigFile};
                 undefined ->
-                    #{config_type => undefined,
-                      config_files => [],
+                    #{config_files => [],
                       config_advanced_file => undefined}
             end,
     ok = override_with_hard_coded_critical_config(),
@@ -81,9 +86,8 @@ set_default_config() ->
     Config = [
               {ra,
                [
-                %% Use a larger segments size for queues.
-                {segment_max_entries, 32768},
-                {wal_max_size_bytes, 536870912} %% 5 * 2 ^ 20
+                {wal_max_size_bytes, 536870912}, %% 5 * 2 ^ 20
+                {wal_max_batch_size, 4096}
                ]},
               {sysmon_handler,
                [{process_limit, 100},
@@ -134,6 +138,19 @@ find_actual_main_config_file(#{main_config_file := File}) ->
             end
     end.
 
+find_additional_config_files(#{additional_config_files := Pattern})
+  when Pattern =/= undefined ->
+    Pattern1 = case filelib:is_dir(Pattern) of
+                   true  -> filename:join(Pattern, "*");
+                   false -> Pattern
+               end,
+    OnlyFiles = [File ||
+                 File <- filelib:wildcard(Pattern1),
+                 filelib:is_regular(File)],
+    lists:sort(OnlyFiles);
+find_additional_config_files(_) ->
+    [].
+
 find_actual_advanced_config_file(#{advanced_config_file := File}) ->
     case filelib:is_regular(File) of
         true  -> File;
@@ -149,26 +166,6 @@ determine_config_format(File) ->
                 {ok, _} -> erlang;
                 _       -> cuttlefish
             end
-    end.
-
-load_erlang_term_based_config_file(ConfigFile) ->
-    rabbit_log_prelaunch:debug(
-      "Loading configuration file \"~ts\" (Erlang terms based)", [ConfigFile]),
-    case file:consult(ConfigFile) of
-        {ok, [Config]} when is_list(Config) ->
-            apply_erlang_term_based_config(Config),
-            Config;
-        {ok, OtherTerms} ->
-            rabbit_log_prelaunch:error(
-              "Failed to load configuration file \"~ts\", "
-              "incorrect format: ~p",
-              [ConfigFile, OtherTerms]),
-            throw({error, failed_to_parse_configuration_file});
-        {error, Reason} ->
-            rabbit_log_prelaunch:error(
-              "Failed to load configuration file \"~ts\": ~ts",
-              [ConfigFile, file:format_error(Reason)]),
-            throw({error, failed_to_read_configuration_file})
     end.
 
 load_cuttlefish_config_file(Context,
@@ -192,8 +189,11 @@ generate_config_from_cuttlefish_files(Context,
         _ ->
             rabbit_log_prelaunch:debug(
               "Configuration schemas found:~n", []),
-            [rabbit_log_prelaunch:debug("  - ~ts", [SchemaFile])
-             || SchemaFile <- SchemaFiles],
+            lists:foreach(
+              fun(SchemaFile) ->
+                      rabbit_log_prelaunch:debug("  - ~ts", [SchemaFile])
+              end,
+              SchemaFiles),
             ok
     end,
     Schema = cuttlefish_schema:files(SchemaFiles),
@@ -201,30 +201,35 @@ generate_config_from_cuttlefish_files(Context,
     %% Load configuration.
     rabbit_log_prelaunch:debug(
       "Loading configuration files (Cuttlefish based):"),
-    [rabbit_log_prelaunch:debug(
-       "  - ~ts", [ConfigFile]) || ConfigFile <- ConfigFiles],
+    lists:foreach(
+      fun(ConfigFile) ->
+              rabbit_log_prelaunch:debug("  - ~ts", [ConfigFile])
+      end, ConfigFiles),
     case cuttlefish_conf:files(ConfigFiles) of
         {errorlist, Errors} ->
-            rabbit_log_prelaunch:error("Error generating configuration:", []),
-            [rabbit_log_prelaunch:error(
-               "  - ~ts",
-               [cuttlefish_error:xlate(Error)])
-             || Error <- Errors],
-            throw({error, failed_to_generate_configuration_file});
+            rabbit_log_prelaunch:error("Error parsing configuration:"),
+            lists:foreach(
+              fun(Error) ->
+                      rabbit_log_prelaunch:error("  - ~ts", [cuttlefish_error:xlate(Error)])
+              end, Errors),
+            rabbit_log_prelaunch:error("Are these files using the Cuttlefish format?"),
+            throw({error, failed_to_parse_configuration_file});
         Config0 ->
             %% Finalize configuration, based on the schema.
             Config = case cuttlefish_generator:map(Schema, Config0) of
                          {error, Phase, {errorlist, Errors}} ->
                              %% TODO
                              rabbit_log_prelaunch:error(
-                               "Error generating configuration in phase ~ts:",
+                               "Error preparing configuration in phase ~ts:",
                                [Phase]),
-                             [rabbit_log_prelaunch:error(
-                                "  - ~ts",
-                                [cuttlefish_error:xlate(Error)])
-                              || Error <- Errors],
+                             lists:foreach(
+                               fun(Error) ->
+                                       rabbit_log_prelaunch:error(
+                                         "  - ~ts",
+                                         [cuttlefish_error:xlate(Error)])
+                               end, Errors),
                              throw(
-                               {error, failed_to_generate_configuration_file});
+                               {error, failed_to_prepare_configuration});
                          ValidConfig ->
                              proplists:delete(vm_args, ValidConfig)
                      end,
@@ -294,7 +299,8 @@ list_schemas_in_app(App) ->
                    []
            end,
     case Unload of
-        true  -> application:unload(App);
+        true  -> _ = application:unload(App),
+                 ok;
         false -> ok
     end,
     List.
@@ -447,11 +453,11 @@ get_passphrase(ConfigEntryDecoder) ->
     case proplists:get_value(passphrase, ConfigEntryDecoder) of
         prompt ->
             IoDevice = get_input_iodevice(),
-            io:setopts(IoDevice, [{echo, false}]),
+            ok = io:setopts(IoDevice, [{echo, false}]),
             PP = lists:droplast(io:get_line(IoDevice,
                 "\nPlease enter the passphrase to unlock encrypted "
                 "configuration entries.\n\nPassphrase: ")),
-            io:setopts(IoDevice, [{echo, true}]),
+            ok = io:setopts(IoDevice, [{echo, true}]),
             io:format(IoDevice, "~n", []),
             PP;
         {file, Filename} ->

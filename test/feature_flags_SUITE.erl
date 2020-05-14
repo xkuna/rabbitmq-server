@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2018-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2018-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(feature_flags_SUITE).
@@ -29,7 +29,8 @@
          init_per_testcase/2,
          end_per_testcase/2,
 
-         registry/1,
+         registry_general_usage/1,
+         registry_concurrent_reloads/1,
          enable_feature_flag_in_a_healthy_situation/1,
          enable_unsupported_feature_flag_in_a_healthy_situation/1,
          enable_feature_flag_when_ff_file_is_unwritable/1,
@@ -47,18 +48,6 @@
          activating_plugin_with_new_ff_enabled/1
         ]).
 
--rabbit_feature_flag(
-   {ff_a,
-    #{desc          => "Feature flag A",
-      stability     => stable
-     }}).
-
--rabbit_feature_flag(
-   {ff_b,
-    #{desc          => "Feature flag B",
-      stability     => stable
-     }}).
-
 suite() ->
     [{timetrap, {minutes, 15}}].
 
@@ -75,7 +64,8 @@ groups() ->
     [
      {registry, [],
       [
-       registry
+       registry_general_usage,
+       registry_concurrent_reloads
       ]},
      {enabling_on_single_node, [],
       [
@@ -115,8 +105,8 @@ groups() ->
 init_per_suite(Config) ->
     rabbit_ct_helpers:log_environment(),
     rabbit_ct_helpers:run_setup_steps(Config, [
-        fun rabbit_ct_broker_helpers:enable_dist_proxy_manager/1
-      ]).
+      fun rabbit_ct_broker_helpers:configure_dist_proxy/1
+    ]).
 
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
@@ -128,8 +118,7 @@ init_per_group(enabling_on_single_node, Config) ->
 init_per_group(enabling_in_cluster, Config) ->
     rabbit_ct_helpers:set_config(
       Config,
-      [{rmq_nodes_count, 5},
-       {rmq_nodes_clustered, false}]);
+      [{rmq_nodes_count, 5}]);
 init_per_group(clustering, Config) ->
     Config1 = rabbit_ct_helpers:set_config(
                 Config,
@@ -137,7 +126,8 @@ init_per_group(clustering, Config) ->
                  {rmq_nodes_clustered, false},
                  {start_rmq_with_plugins_disabled, true}]),
     rabbit_ct_helpers:run_setup_steps(Config1, [
-        fun build_my_plugin/1
+        fun build_my_plugin/1,
+        fun work_around_cli_and_rabbit_circular_dep/1
       ]);
 init_per_group(activating_plugin, Config) ->
     Config1 = rabbit_ct_helpers:set_config(
@@ -146,7 +136,8 @@ init_per_group(activating_plugin, Config) ->
                  {rmq_nodes_clustered, true},
                  {start_rmq_with_plugins_disabled, true}]),
     rabbit_ct_helpers:run_setup_steps(Config1, [
-        fun build_my_plugin/1
+        fun build_my_plugin/1,
+        fun work_around_cli_and_rabbit_circular_dep/1
       ]);
 init_per_group(_, Config) ->
     Config.
@@ -159,6 +150,7 @@ init_per_testcase(Testcase, Config) ->
     TestNumber = rabbit_ct_helpers:testcase_number(Config, ?MODULE, Testcase),
     case ?config(tc_group_properties, Config) of
         [{name, registry} | _] ->
+            application:set_env(lager, colored, true),
             application:set_env(
               lager,
               handlers, [{lager_console_backend, [{level, debug}]}]),
@@ -166,6 +158,9 @@ init_per_testcase(Testcase, Config) ->
               lager,
               extra_sinks,
               [{rabbit_log_lager_event,
+                [{handlers, [{lager_console_backend, [{level, debug}]}]}]
+               },
+               {rabbit_log_feature_flags_lager_event,
                 [{handlers, [{lager_console_backend, [{level, debug}]}]}]
                }]),
             lager:start(),
@@ -229,9 +224,7 @@ init_per_testcase(Testcase, Config) ->
             Config3 = rabbit_ct_helpers:run_steps(
                         Config2,
                         rabbit_ct_broker_helpers:setup_steps() ++
-                        rabbit_ct_client_helpers:setup_steps() ++
-                        [fun rabbit_ct_broker_helpers:enable_dist_proxy/1,
-                         fun rabbit_ct_broker_helpers:cluster_nodes/1]),
+                        rabbit_ct_client_helpers:setup_steps()),
             case Config3 of
                 {skip, _} ->
                     Config3;
@@ -269,9 +262,18 @@ end_per_testcase(Testcase, Config) ->
 -define(list_ff(Which),
         lists:sort(maps:keys(rabbit_ff_registry:list(Which)))).
 
-registry(_Config) ->
+registry_general_usage(_Config) ->
     %% At first, the registry must be uninitialized.
     ?assertNot(rabbit_ff_registry:is_registry_initialized()),
+
+    FeatureFlags = #{ff_a =>
+                     #{desc      => "Feature flag A",
+                       stability => stable},
+                     ff_b =>
+                     #{desc      => "Feature flag B",
+                       stability => stable}},
+    rabbit_feature_flags:inject_test_feature_flags(
+      feature_flags_to_app_attrs(FeatureFlags)),
 
     %% After initialization, it must know about the feature flags
     %% declared in this testsuite. They must be disabled however.
@@ -384,6 +386,112 @@ registry(_Config) ->
     ?assertNot(rabbit_ff_registry:is_enabled(ff_b)),
     ?assertNot(rabbit_ff_registry:is_enabled(ff_c)),
     ?assertNot(rabbit_ff_registry:is_enabled(ff_d)).
+
+registry_concurrent_reloads(_Config) ->
+    case rabbit_ff_registry:is_registry_initialized() of
+        true  -> ok;
+        false -> rabbit_feature_flags:initialize_registry()
+    end,
+    ?assert(rabbit_ff_registry:is_registry_initialized()),
+
+    Parent = self(),
+
+    MakeName = fun(I) ->
+                       list_to_atom(rabbit_misc:format("ff_~2..0b", [I]))
+               end,
+
+    ProcIs = lists:seq(1, 10),
+    Fun = fun(I) ->
+                  %% Each process will declare its own feature flag to
+                  %% make sure that each generated registry module is
+                  %% different, and we don't loose previously declared
+                  %% feature flags.
+                  Name = MakeName(I),
+                  Desc = rabbit_misc:format("Feature flag ~b", [I]),
+                  NewFF = #{Name =>
+                            #{desc      => Desc,
+                              stability => stable}},
+                  rabbit_feature_flags:initialize_registry(NewFF),
+                  unlink(Parent)
+          end,
+
+    %% Prepare feature flags which the spammer process should get at
+    %% some point.
+    FeatureFlags = #{ff_a =>
+                     #{desc      => "Feature flag A",
+                       stability => stable},
+                     ff_b =>
+                     #{desc      => "Feature flag B",
+                       stability => stable}},
+    rabbit_feature_flags:inject_test_feature_flags(
+      feature_flags_to_app_attrs(FeatureFlags)),
+
+    %% Spawn a process which heavily uses the registry.
+    FinalFFList = lists:sort(
+                    maps:keys(FeatureFlags) ++
+                    [MakeName(I) || I <- ProcIs]),
+    Spammer = spawn_link(fun() -> registry_spammer([], FinalFFList) end),
+    rabbit_log_feature_flags:info(
+      ?MODULE_STRING ": Started registry spammer (~p)",
+      [self()]),
+
+    %% We acquire the lock from the main process to synchronize the test
+    %% processes we are about to spawn.
+    Lock = rabbit_feature_flags:registry_loading_lock(),
+    ThisNode = [node()],
+    rabbit_log_feature_flags:info(
+      ?MODULE_STRING ": Acquiring registry load lock"),
+    global:set_lock(Lock, ThisNode),
+
+    Pids = [begin
+                Pid = spawn_link(fun() -> Fun(I) end),
+                _ = erlang:monitor(process, Pid),
+                Pid
+            end
+            || I <- ProcIs],
+
+    %% We wait for one second to make sure all processes were started
+    %% and already sleep on the lock. Not really "make sure" because
+    %% we don't have a way to verify this fact, but it must be enough,
+    %% right?
+    timer:sleep(1000),
+    rabbit_log_feature_flags:info(
+      ?MODULE_STRING ": Releasing registry load lock"),
+    global:del_lock(Lock, ThisNode),
+
+    rabbit_log_feature_flags:info(
+      ?MODULE_STRING ": Wait for test processes to finish"),
+    lists:foreach(
+      fun(Pid) ->
+              receive {'DOWN', _, process, Pid, normal} -> ok end
+      end,
+      Pids),
+
+    %% We wait for one more second to make sure the spammer sees
+    %% all added feature flags.
+    timer:sleep(1000),
+
+    unlink(Spammer),
+    exit(Spammer, normal).
+
+registry_spammer(CurrentFeatureNames, FinalFeatureNames) ->
+    %% Infinite loop.
+    case ?list_ff(all) of
+        CurrentFeatureNames ->
+            registry_spammer(CurrentFeatureNames, FinalFeatureNames);
+        FinalFeatureNames ->
+            rabbit_log_feature_flags:info(
+              ?MODULE_STRING ": Registry spammer: all feature flags "
+              "appeared"),
+            registry_spammer1(FinalFeatureNames);
+        NewFeatureNames
+          when length(NewFeatureNames) > length(CurrentFeatureNames) ->
+            registry_spammer(NewFeatureNames, FinalFeatureNames)
+    end.
+
+registry_spammer1(FeatureNames) ->
+    ?assertEqual(FeatureNames, ?list_ff(all)),
+    registry_spammer1(FeatureNames).
 
 enable_feature_flag_in_a_healthy_situation(Config) ->
     FeatureName = ff_from_testsuite,
@@ -909,7 +1017,19 @@ build_my_plugin(Config) ->
         [] ->
             DepsDir = ?config(erlang_mk_depsdir, Config),
             Args = ["test-dist",
-                    {"DEPS_DIR=~s", [DepsDir]}],
+                    {"DEPS_DIR=~s", [DepsDir]},
+                    %% We clear ALL_DEPS_DIRS to make sure they are
+                    %% not recompiled when the plugin is built. `rabbit`
+                    %% was previously compiled with -DTEST and if it is
+                    %% recompiled because of this plugin, it will be
+                    %% recompiled without -DTEST: the testsuite depends
+                    %% on test code so we can't allow that.
+                    %%
+                    %% Note that we do not clear the DEPS variable:
+                    %% we need it to be correct because it is used to
+                    %% generate `my_plugin.app` (and a RabbitMQ plugin
+                    %% must depend on `rabbit`).
+                    "ALL_DEPS_DIRS="],
             case rabbit_ct_helpers:make(Config1, PluginSrcDir, Args) of
                 {ok, _} ->
                     {_, OtherPlugins1} = list_my_plugin_plugins(PluginSrcDir),
@@ -950,9 +1070,42 @@ list_my_plugin_plugins(PluginSrcDir) ->
       end, Files).
 
 remove_other_plugins(PluginSrcDir, OtherPlugins) ->
-    [ok = file:delete(
-            filename:join(PluginSrcDir, Filename))
+    [ok = file:delete(filename:join(PluginSrcDir, Filename))
      || Filename <- OtherPlugins].
+
+work_around_cli_and_rabbit_circular_dep(Config) ->
+    %% FIXME: We also need to copy `rabbit` in `my_plugins` plugins
+    %% directory, not because `my_plugin` depends on it, but because the
+    %% CLI erroneously depends on the broker.
+    %%
+    %% This can't be fixed easily because this is a circular dependency
+    %% (i.e. the broker depends on the CLI). So until a proper solution
+    %% is implemented, keep this second copy of the broker for the CLI
+    %% to find it.
+    InitialPluginsDir = filename:join(
+                          ?config(current_srcdir, Config),
+                          "plugins"),
+    PluginsDir = ?config(rmq_plugins_dir, Config),
+    lists:foreach(
+      fun(Path) ->
+              Filename = filename:basename(Path),
+              IsRabbit = re:run(
+                           Filename,
+                           "^rabbit-", [{capture, none}]) =:= match,
+              case IsRabbit of
+                  true ->
+                      Dest = filename:join(PluginsDir, Filename),
+                      ct:pal(
+                        ?LOW_IMPORTANCE,
+                        "Copy `~s` to `~s` to fix CLI erroneous "
+                        "dependency on `rabbit`", [Path, Dest]),
+                      {ok, _} = file:copy(Path, Dest);
+                  false ->
+                      ok
+              end
+      end,
+      filelib:wildcard(filename:join(InitialPluginsDir, "*"))),
+    Config.
 
 enable_feature_flag_on(Config, Node, FeatureName) ->
     rabbit_ct_broker_helpers:rpc(
@@ -985,16 +1138,20 @@ log_feature_flags_of_all_nodes(Config) ->
       Config, rabbit_feature_flags, info, [#{color => false,
                                              lines => false}]).
 
+feature_flags_to_app_attrs(FeatureFlags) when is_map(FeatureFlags) ->
+    [{?MODULE, % Application
+      ?MODULE, % Module
+      maps:to_list(FeatureFlags)}].
+
 declare_arbitrary_feature_flag(Config) ->
-    NewFeatureFlags = #{ff_from_testsuite =>
-                        #{desc => "My feature flag",
-                          provided_by => ?MODULE,
-                          stability => stable}},
+    FeatureFlags = #{ff_from_testsuite =>
+                     #{desc => "My feature flag",
+                       stability => stable}},
     rabbit_ct_broker_helpers:rpc_all(
       Config,
       rabbit_feature_flags,
-      initialize_registry,
-      [NewFeatureFlags]),
+      inject_test_feature_flags,
+      [feature_flags_to_app_attrs(FeatureFlags)]),
     ok.
 
 block(Pairs)   -> [block(X, Y) || {X, Y} <- Pairs].

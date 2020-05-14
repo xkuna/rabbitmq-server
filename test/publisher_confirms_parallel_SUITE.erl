@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2011-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2011-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 %%
 %% For the full spec see: https://www.rabbitmq.com/confirms.html
@@ -35,20 +35,43 @@ all() ->
     ].
 
 groups() ->
-    PublisherConfirmTests = [publisher_confirms,
-                             publisher_confirms_with_deleted_queue,
-                             confirm_select_ok,
-                             confirm_nowait,
-                             confirm_ack,
-                             confirm_acks,
-                             confirm_mandatory_unroutable,
-                             confirm_unroutable_message],
     [
      {publisher_confirm_tests, [],
       [
-       {classic_queue, [parallel], PublisherConfirmTests ++ [confirm_nack]},
-       {mirrored_queue, [parallel], PublisherConfirmTests ++ [confirm_nack]},
-       {quorum_queue, [parallel], PublisherConfirmTests ++ [confirm_minority]}
+       {classic_queue,
+        [parallel],
+        [publisher_confirms,
+         publisher_confirms_with_deleted_queue,
+         confirm_select_ok,
+         confirm_nowait,
+         confirm_ack,
+         confirm_acks,
+         confirm_mandatory_unroutable,
+         confirm_unroutable_message,
+         confirm_nack]
+       },
+       {mirrored_queue,
+        [parallel],
+        [publisher_confirms_with_deleted_queue,
+         confirm_select_ok,
+         confirm_nowait,
+         confirm_ack,
+         confirm_acks,
+         confirm_mandatory_unroutable,
+         confirm_unroutable_message]
+       },
+       {quorum_queue,
+        [parallel],
+        [publisher_confirms,
+         publisher_confirms_with_deleted_queue,
+         confirm_select_ok,
+         confirm_nowait,
+         confirm_ack,
+         confirm_acks,
+         confirm_mandatory_unroutable,
+         confirm_unroutable_message,
+         confirm_minority]
+       }
       ]}
     ].
 

@@ -8,7 +8,7 @@
 %% License for the specific language governing rights and limitations
 %% under the License.
 %%
-%% Copyright (c) 2007-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% This test suite covers the definitions import function
@@ -25,12 +25,13 @@
 
 all() ->
     [
-     {group, non_parallel_tests}
+     {group, import_on_a_running_node},
+     {group, import_on_a_booting_node}
     ].
 
 groups() ->
     [
-     {non_parallel_tests, [], [
+     {import_on_a_running_node, [], [
                                %% Note: to make it easier to see which case failed,
                                %% these are intentionally not folded into a single case.
                                %% If generation becomes an alternative worth considering for these tests,
@@ -45,8 +46,12 @@ groups() ->
                                import_case8,
                                import_case9,
                                import_case10,
-                               import_case11
-                              ]}
+                               import_case11,
+                               import_case12
+                              ]},
+        {import_on_a_booting_node, [], [
+            import_on_boot_case1
+        ]}
     ].
 
 %% -------------------------------------------------------------------
@@ -73,6 +78,20 @@ init_per_group(_, Config) ->
 end_per_group(_, Config) ->
     Config.
 
+init_per_testcase(import_on_boot_case1 = Testcase, Config) ->
+    CasePath = filename:join(?config(data_dir, Config), "case5.json"),
+    Config1 = rabbit_ct_helpers:set_config(Config, [
+        {rmq_nodename_suffix, Testcase},
+        {rmq_nodes_count, 1}
+      ]),
+    Config2 = rabbit_ct_helpers:merge_app_env(Config1,
+      {rabbit, [
+          {load_definitions, CasePath}
+      ]}),
+    rabbit_ct_helpers:run_steps(Config2,
+      rabbit_ct_broker_helpers:setup_steps() ++
+      rabbit_ct_client_helpers:setup_steps()),
+    rabbit_ct_helpers:testcase_started(Config, Testcase);
 init_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_started(Config, Testcase).
 
@@ -105,10 +124,29 @@ import_case5(Config) ->
                   {<<"1884">>,<<"vhost2">>}]).
 
 import_case11(Config) -> import_file_case(Config, "case11").
+import_case12(Config) -> import_invalid_file_case(Config, "failing_case12").
+
+import_on_boot_case1(Config) ->
+    %% see case5.json
+    VHost = <<"vhost2">>,
+    %% verify that vhost2 eventually starts
+    case rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_vhost, await_running_on_all_nodes, [VHost, 3000]) of
+        ok -> ok;
+        {error, timeout} -> ct:fail("virtual host ~p was not imported on boot", [VHost])
+    end.
+
+%%
+%% Implementation
+%%
 
 import_file_case(Config, CaseName) ->
     CasePath = filename:join(?config(data_dir, Config), CaseName ++ ".json"),
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, run_import_case, [CasePath]),
+    ok.
+
+import_invalid_file_case(Config, CaseName) ->
+    CasePath = filename:join(?config(data_dir, Config), CaseName ++ ".json"),
+    rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, run_invalid_import_case, [CasePath]),
     ok.
 
 import_from_directory_case(Config, CaseName) ->
@@ -143,4 +181,14 @@ run_import_case(Path) ->
      {error, E} ->
        ct:pal("Import case ~p failed: ~p~n", [Path, E]),
        ct:fail({failure, Path, E})
+   end.
+
+run_invalid_import_case(Path) ->
+   {ok, Body} = file:read_file(Path),
+   ct:pal("Successfully loaded a definition to import from ~p~n", [Path]),
+   case rabbit_definitions:import_raw(Body) of
+     ok ->
+       ct:pal("Expected import case ~p to fail~n", [Path]),
+       ct:fail({failure, Path});
+     {error, _E} -> ok
    end.

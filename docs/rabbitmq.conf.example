@@ -436,28 +436,24 @@
 ## =====================
 ##
 
-## Set (internal) statistics collection granularity.
-##
-## Can be none, coarse or fine
-# collect_statistics = none
-
-# collect_statistics = coarse
-
 ## Statistics collection interval (in milliseconds). Increasing
 ## this will reduce the load on management database.
 ##
 # collect_statistics_interval = 5000
 
+## Fine vs. coarse statistics
+#
+# This value is no longer meant to be configured directly.
+#
+# See https://www.rabbitmq.com/management.html#fine-stats.
+
 ##
 ## Ra Settings
 ## =====================
 ##
-## NB: changing these on a node with existing data directory
-##     can lead to DATA LOSS.
-##
 # raft.segment_max_entries = 65536
 # raft.wal_max_size_bytes = 1048576
-# raft.wal_max_batch_size = 32768
+# raft.wal_max_batch_size = 4096
 # raft.snapshot_chunk_size = 1000000
 
 ##
@@ -520,6 +516,17 @@
 ## See the plugins documentation for more information.
 ##
 # proxy_protocol = false
+
+## Overriden product name and version.
+## They are set to "RabbitMQ" and the release version by default.
+# product.name = RabbitMQ
+# product.version = 1.2.3
+
+## "Message of the day" file.
+## Its content is used to expand the logged and printed banners.
+## Default to /etc/rabbitmq/motd on Unix, %APPDATA%\RabbitMQ\motd.txt
+## on Windows.
+# motd_file = /etc/rabbitmq/motd
 
 ## ----------------------------------------------------------------------------
 ## Advanced Erlang Networking/Clustering Options.
@@ -603,7 +610,8 @@
 # management.ssl.ciphers.8 = ECDH-RSA-AES256-SHA384
 # management.ssl.ciphers.9 = DHE-RSA-AES256-GCM-SHA384
 
-
+## URL path prefix for HTTP API and management UI
+# management.path_prefix = /a-prefix
 
 ## One of 'basic', 'detailed' or 'none'. See
 ## https://rabbitmq.com/management.html#fine-stats for more details.

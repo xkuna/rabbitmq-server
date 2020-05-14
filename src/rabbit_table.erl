@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_table).
@@ -114,6 +114,7 @@ wait(TableNames, Timeout, Retries) ->
              end,
     case {Retries, Result} of
         {_, ok} ->
+            rabbit_log:info("Successfully synced tables from a peer"),
             ok;
         {1, {error, _} = Error} ->
             throw(Error);

@@ -11,11 +11,11 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2018-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2018-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% @author The RabbitMQ team
-%% @copyright 2018-2019 Pivotal Software, Inc.
+%% @copyright 2018-2020 VMware, Inc. or its affiliates.
 %%
 %% @doc
 %% This module exposes the API of the {@link rabbit_feature_flags}
@@ -36,6 +36,10 @@
          is_enabled/1,
          is_registry_initialized/0,
          is_registry_written_to_disk/0]).
+
+-ifdef(TEST).
+-on_load(on_load/0).
+-endif.
 
 -spec get(rabbit_feature_flags:feature_name()) ->
     rabbit_feature_flags:feature_props() | undefined.
@@ -183,3 +187,12 @@ always_return_true() ->
 
 always_return_false() ->
     not always_return_true().
+
+-ifdef(TEST).
+on_load() ->
+     _ = (catch rabbit_log_feature_flags:debug(
+                  "Feature flags: Loading initial (uninitialized) registry "
+                  "module (~p)",
+                  [self()])),
+    ok.
+-endif.

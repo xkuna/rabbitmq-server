@@ -44,6 +44,8 @@ all_tests() ->
      scenario18,
      scenario19,
      scenario20,
+     scenario21,
+     scenario22,
      single_active,
      single_active_01,
      single_active_02,
@@ -51,7 +53,8 @@ all_tests() ->
      single_active_ordering,
      single_active_ordering_01,
      single_active_ordering_03,
-     in_memory_limit
+     in_memory_limit,
+     max_length
      % single_active_ordering_02
     ].
 
@@ -356,6 +359,42 @@ scenario20(_Config) ->
                         max_in_memory_length => 1}, Commands),
     ok.
 
+scenario21(_Config) ->
+    C1Pid = c:pid(0,883,1),
+    C1 = {<<>>, C1Pid},
+    E = c:pid(0,176,1),
+    Commands = [
+                make_checkout(C1, {auto,2,simple_prefetch}),
+                make_enqueue(E,1,<<"1">>),
+                make_enqueue(E,2,<<"2">>),
+                make_enqueue(E,3,<<"3">>),
+                rabbit_fifo:make_discard(C1, [0]),
+                rabbit_fifo:make_settle(C1, [1])
+               ],
+    run_snapshot_test(#{name => ?FUNCTION_NAME,
+                        release_cursor_interval => 1,
+                        dead_letter_handler => {?MODULE, banana, []}},
+                      Commands),
+    ok.
+
+scenario22(_Config) ->
+    % C1Pid = c:pid(0,883,1),
+    % C1 = {<<>>, C1Pid},
+    E = c:pid(0,176,1),
+    Commands = [
+                make_enqueue(E,1,<<"1">>),
+                make_enqueue(E,2,<<"2">>),
+                make_enqueue(E,3,<<"3">>),
+                make_enqueue(E,4,<<"4">>),
+                make_enqueue(E,5,<<"5">>)
+               ],
+    run_snapshot_test(#{name => ?FUNCTION_NAME,
+                        release_cursor_interval => 1,
+                        max_length => 3,
+                        dead_letter_handler => {?MODULE, banana, []}},
+                      Commands),
+    ok.
+
 single_active_01(_Config) ->
     C1Pid = test_util:fake_pid(rabbit@fake_node1),
     C1 = {<<0>>, C1Pid},
@@ -450,16 +489,18 @@ snapshots(_Config) ->
                                       oneof([range(1, 10), undefined]),
                                       oneof([range(1, 1000), undefined])
                                      }}]),
-                      ?FORALL(O, ?LET(Ops, log_gen(250), expand(Ops)),
-                              collect({log_size, length(O)},
-                                      snapshots_prop(
-                                        config(?FUNCTION_NAME,
-                                               Length,
-                                               Bytes,
-                                               SingleActiveConsumer,
-                                               DeliveryLimit,
-                                               InMemoryLength,
-                                               InMemoryBytes), O))))
+                      begin
+                          Config = config(?FUNCTION_NAME,
+                                          Length,
+                                          Bytes,
+                                          SingleActiveConsumer,
+                                          DeliveryLimit,
+                                          InMemoryLength,
+                                          InMemoryBytes),
+                          ?FORALL(O, ?LET(Ops, log_gen(256), expand(Ops, Config)),
+                                  collect({log_size, length(O)},
+                                          snapshots_prop(Config, O)))
+                      end)
       end, [], 2500).
 
 single_active(_Config) ->
@@ -474,21 +515,22 @@ single_active(_Config) ->
                                       oneof([range(1, 10), undefined]),
                                       oneof([range(1, 1000), undefined])
                                      }}]),
-                      ?FORALL(O, ?LET(Ops, log_gen(Size), expand(Ops)),
-                              collect({log_size, length(O)},
-                                      single_active_prop(
-                                        config(?FUNCTION_NAME,
+                      begin
+                          Config  = config(?FUNCTION_NAME,
                                                Length,
                                                Bytes,
                                                true,
                                                DeliveryLimit,
                                                InMemoryLength,
-                                               InMemoryBytes), O,
-                                        false))))
+                                               InMemoryBytes),
+                      ?FORALL(O, ?LET(Ops, log_gen(Size), expand(Ops, Config)),
+                              collect({log_size, length(O)},
+                                      single_active_prop(Config, O, false)))
+                      end)
       end, [], Size).
 
 single_active_ordering(_Config) ->
-    Size = 4000,
+    Size = 2000,
     Fun = {-1, fun ({Prev, _}) -> {Prev + 1, Prev + 1} end},
     run_proper(
       fun () ->
@@ -586,7 +628,8 @@ in_memory_limit(_Config) ->
     Size = 2000,
     run_proper(
       fun () ->
-              ?FORALL({Length, Bytes, SingleActiveConsumer, DeliveryLimit, InMemoryLength, InMemoryBytes},
+              ?FORALL({Length, Bytes, SingleActiveConsumer, DeliveryLimit,
+                       InMemoryLength, InMemoryBytes},
                       frequency([{10, {0, 0, false, 0, 0, 0}},
                                  {5, {oneof([range(1, 10), undefined]),
                                       oneof([range(1, 1000), undefined]),
@@ -595,22 +638,53 @@ in_memory_limit(_Config) ->
                                       range(1, 10),
                                       range(1, 1000)
                                      }}]),
-                      ?FORALL(O, ?LET(Ops, log_gen(Size), expand(Ops)),
-                              collect({log_size, length(O)},
-                                      in_memory_limit_prop(
-                                        config(?FUNCTION_NAME,
+                      begin
+                          Config = config(?FUNCTION_NAME,
                                                Length,
                                                Bytes,
                                                SingleActiveConsumer,
                                                DeliveryLimit,
                                                InMemoryLength,
-                                               InMemoryBytes), O))))
+                                               InMemoryBytes),
+                      ?FORALL(O, ?LET(Ops, log_gen(Size), expand(Ops, Config)),
+                              collect({log_size, length(O)},
+                                      in_memory_limit_prop(Config, O)))
+                      end)
       end, [], Size).
 
-config(Name, Length, Bytes, SingleActive, DeliveryLimit, InMemoryLength, InMemoryBytes) ->
+max_length(_Config) ->
+    %% tests that max length is never transgressed
+    Size = 1000,
+    run_proper(
+      fun () ->
+              ?FORALL({Length, SingleActiveConsumer, DeliveryLimit,
+                       InMemoryLength},
+                      {oneof([range(1, 100), undefined]),
+                       boolean(),
+                       range(1, 3),
+                       range(1, 10)
+                      },
+                      begin
+                          Config = config(?FUNCTION_NAME,
+                                          Length,
+                                          undefined,
+                                          SingleActiveConsumer,
+                                          DeliveryLimit,
+                                          InMemoryLength,
+                                          undefined),
+                          ?FORALL(O, ?LET(Ops, log_gen_config(Size),
+                                          expand(Ops, Config)),
+                                  collect({log_size, length(O)},
+                                          max_length_prop(Config, O)))
+                      end)
+      end, [], Size).
+
+config(Name, Length, Bytes, SingleActive, DeliveryLimit,
+       InMemoryLength, InMemoryBytes) ->
     #{name => Name,
       max_length => map_max(Length),
       max_bytes => map_max(Bytes),
+      dead_letter_handler => {?MODULE, banana, []},
       single_active_consumer_on => SingleActive,
       delivery_limit => map_max(DeliveryLimit),
       max_in_memory_length => map_max(InMemoryLength),
@@ -644,6 +718,29 @@ in_memory_limit_prop(Conf0, Commands) ->
             false
     end.
 
+max_length_prop(Conf0, Commands) ->
+    Conf = Conf0#{release_cursor_interval => 100},
+    Indexes = lists:seq(1, length(Commands)),
+    Entries = lists:zip(Indexes, Commands),
+    Invariant = fun (#rabbit_fifo{cfg = #cfg{max_length = MaxLen}} = S) ->
+                        #{num_ready_messages := MsgReady} = rabbit_fifo:overview(S),
+                        % ct:pal("msg Ready ~w ~w", [MsgReady, MaxLen]),
+                        MsgReady =< MaxLen
+                end,
+    try run_log(test_init(Conf), Entries, Invariant) of
+        {_State, _Effects} ->
+            true;
+        _ ->
+            true
+    catch
+        Err ->
+            ct:pal("Commands: ~p~nConf~p~n", [Commands, Conf]),
+            ct:pal("Err: ~p~n", [Err]),
+            false
+    end.
+
+validate_idx_order([], _ReleaseCursorIdx) ->
+    true;
 validate_idx_order(Idxs, ReleaseCursorIdx) ->
     Min = lists:min(Idxs),
     case Min < ReleaseCursorIdx of
@@ -666,9 +763,9 @@ single_active_prop(Conf0, Commands, ValidateOrder) ->
                         map_size(Up) =< 1
                 end,
     try run_log(test_init(Conf), Entries, Invariant) of
-        {State, Effects} when ValidateOrder ->
-            ct:pal("Effects: ~p~n", [Effects]),
-            ct:pal("State: ~p~n", [State]),
+        {_State, Effects} when ValidateOrder ->
+            % ct:pal("Effects: ~p~n", [Effects]),
+            % ct:pal("State: ~p~n", [State]),
             %% validate message ordering
             lists:foldl(fun ({send_msg, Pid, {delivery, Tag, Msgs}, ra_event},
                              Acc) ->
@@ -741,14 +838,44 @@ log_gen(Size, _Body) ->
                           {40, {input_event,
                                 frequency([{10, settle},
                                            {2, return},
-                                           {1, discard},
-                                           {1, requeue}])}},
+                                           {2, discard},
+                                           {2, requeue}])}},
                           {2, checkout_gen(oneof(CPids))},
                           {1, checkout_cancel_gen(oneof(CPids))},
                           {1, down_gen(oneof(EPids ++ CPids))},
                           {1, nodeup_gen(Nodes)},
                           {1, purge}
                          ]))))).
+
+log_gen_config(Size) ->
+    Nodes = [node(),
+             fakenode@fake,
+             fakenode@fake2
+            ],
+    ?LET(EPids, vector(2, pid_gen(Nodes)),
+         ?LET(CPids, vector(2, pid_gen(Nodes)),
+              resize(Size,
+                     list(
+                       frequency(
+                         [{20, enqueue_gen(oneof(EPids))},
+                          {40, {input_event,
+                                frequency([{5, settle},
+                                           {5, return},
+                                           {2, discard},
+                                           {2, requeue}])}},
+                          {2, checkout_gen(oneof(CPids))},
+                          {1, checkout_cancel_gen(oneof(CPids))},
+                          {1, down_gen(oneof(EPids ++ CPids))},
+                          {1, nodeup_gen(Nodes)},
+                          {1, purge},
+                          {1, ?LET({MaxInMem,
+                                    MaxLen},
+                                   {choose(1, 10),
+                                    choose(1, 10)},
+                                   {update_config,
+                                    #{max_in_memory_length => MaxInMem,
+                                      max_length => MaxLen}})
+                          }]))))).
 
 log_gen_ordered(Size) ->
     Nodes = [node(),
@@ -812,17 +939,19 @@ checkout_gen(Pid) ->
             effects = queue:new() :: queue:queue(),
             %% to transform the body
             enq_body_fun = {0, fun ra_lib:id/1},
+            config :: map(),
             log = [] :: list(),
             down = #{} :: #{pid() => noproc | noconnection}
            }).
 
-expand(Ops) ->
-    expand(Ops, {undefined, fun ra_lib:id/1}).
+expand(Ops, Config) ->
+    expand(Ops, Config, {undefined, fun ra_lib:id/1}).
 
-expand(Ops, EnqFun) ->
+expand(Ops, Config, EnqFun) ->
     %% execute each command against a rabbit_fifo state and capture all relevant
     %% effects
-    T = #t{enq_body_fun = EnqFun},
+    T = #t{enq_body_fun = EnqFun,
+           config = Config},
     #t{effects = Effs} = T1 = lists:foldl(fun handle_op/2, T, Ops),
     %% process the remaining effect
     #t{log = Log} = lists:foldl(fun do_apply/2,
@@ -928,7 +1057,10 @@ handle_op({input_event, Settlement}, #t{effects = Effs,
             T
     end;
 handle_op(purge, T) ->
-    do_apply(rabbit_fifo:make_purge(), T).
+    do_apply(rabbit_fifo:make_purge(), T);
+handle_op({update_config, Changes}, #t{config = Conf} = T) ->
+    Config = maps:merge(Conf, Changes),
+    do_apply(rabbit_fifo:make_update_config(Config), T).
 
 
 do_apply(Cmd, #t{effects = Effs,
@@ -980,6 +1112,8 @@ run_proper(Fun, Args, NumTests) ->
 run_snapshot_test(Conf, Commands) ->
     %% create every incremental permutation of the commands lists
     %% and run the snapshot tests against that
+    ct:pal("running snapshot test with ~b commands using config ~p",
+           [length(Commands), Conf]),
     [begin
          % ?debugFmt("~w running command to ~w~n", [?FUNCTION_NAME, lists:last(C)]),
          run_snapshot_test0(Conf, C)

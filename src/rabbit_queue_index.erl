@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_queue_index).
@@ -717,7 +717,6 @@ queue_index_walker({start, DurableQueues}) when is_list(DurableQueues) ->
 queue_index_walker({next, Gatherer}) when is_pid(Gatherer) ->
     case gatherer:out(Gatherer) of
         empty ->
-            unlink(Gatherer),
             ok = gatherer:stop(Gatherer),
             finished;
         {value, {MsgId, Count}} ->
@@ -1432,7 +1431,6 @@ foreach_queue_index(Funs) ->
                 end)
      end || QueueDirName <- QueueDirNames],
     empty = gatherer:out(Gatherer),
-    unlink(Gatherer),
     ok = gatherer:stop(Gatherer).
 
 transform_queue(Dir, Gatherer, {JournalFun, SegmentFun}) ->

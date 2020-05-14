@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_reader).
@@ -1139,9 +1139,8 @@ handle_method0(MethodName, FieldsBin,
             throw({connection_closed_abruptly, State});
           exit:#amqp_error{method = none} = Reason ->
             handle_exception(State, 0, Reason#amqp_error{method = MethodName});
-          Type:Reason ->
-            Stack = erlang:get_stacktrace(),
-            handle_exception(State, 0, {Type, Reason, MethodName, Stack})
+          Type:Reason:Stacktrace ->
+            handle_exception(State, 0, {Type, Reason, MethodName, Stacktrace})
     end.
 
 handle_method0(#'connection.start_ok'{mechanism = Mechanism,

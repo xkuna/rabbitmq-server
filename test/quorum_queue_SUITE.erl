@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2018-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2018-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(quorum_queue_SUITE).
@@ -70,6 +70,7 @@ groups() ->
                                             recover_from_multiple_failures,
                                             leadership_takeover,
                                             delete_declare,
+                                            delete_member_during_node_down,
                                             metrics_cleanup_on_leadership_takeover,
                                             metrics_cleanup_on_leader_crash,
                                             consume_in_minority,
@@ -106,6 +107,7 @@ all_tests() ->
      publish_and_restart,
      subscribe_should_fail_when_global_qos_true,
      dead_letter_to_classic_queue,
+     dead_letter_with_memory_limit,
      dead_letter_to_quorum_queue,
      dead_letter_from_classic_to_quorum_queue,
      dead_letter_policy,
@@ -153,7 +155,7 @@ init_per_suite(Config0) ->
                Config0, {rabbit, [{quorum_tick_interval, 1000}]}),
     rabbit_ct_helpers:run_setup_steps(
       Config,
-      [fun rabbit_ct_broker_helpers:enable_dist_proxy_manager/1]).
+      [fun rabbit_ct_broker_helpers:configure_dist_proxy/1]).
 
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
@@ -231,9 +233,7 @@ init_per_testcase(Testcase, Config) when Testcase == reconnect_consumer_and_publ
     Ret = rabbit_ct_helpers:run_steps(
             Config2,
             rabbit_ct_broker_helpers:setup_steps() ++
-            rabbit_ct_client_helpers:setup_steps() ++
-            [fun rabbit_ct_broker_helpers:enable_dist_proxy/1,
-             fun rabbit_ct_broker_helpers:cluster_nodes/1]),
+            rabbit_ct_client_helpers:setup_steps()),
     case Ret of
         {skip, _} ->
             Ret;
@@ -767,6 +767,21 @@ dead_letter_to_classic_queue(Config) ->
     CQ = <<"classic-dead_letter_to_classic_queue">>,
     ?assertEqual({'queue.declare_ok', QQ, 0, 0},
                  declare(Ch, QQ, [{<<"x-queue-type">>, longstr, <<"quorum">>},
+                                  {<<"x-dead-letter-exchange">>, longstr, <<>>},
+                                  {<<"x-dead-letter-routing-key">>, longstr, CQ}
+                                 ])),
+    ?assertEqual({'queue.declare_ok', CQ, 0, 0}, declare(Ch, CQ, [])),
+    test_dead_lettering(true, Config, Ch, Servers, ra_name(QQ), QQ, CQ).
+
+dead_letter_with_memory_limit(Config) ->
+    [Server | _] = Servers = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    QQ = ?config(queue_name, Config),
+    CQ = <<"classic-dead_letter_with_memory_limit">>,
+    ?assertEqual({'queue.declare_ok', QQ, 0, 0},
+                 declare(Ch, QQ, [{<<"x-queue-type">>, longstr, <<"quorum">>},
+                                  {<<"x-max-in-memory-length">>, long, 0},
                                   {<<"x-dead-letter-exchange">>, longstr, <<>>},
                                   {<<"x-dead-letter-routing-key">>, longstr, CQ}
                                  ])),
@@ -1412,6 +1427,24 @@ delete_member_not_a_member(Config) ->
     ?assertEqual(ok,
                  rpc:call(Server, rabbit_quorum_queue, delete_member,
                           [<<"/">>, QQ, Server])).
+
+delete_member_during_node_down(Config) ->
+    [Server, DownServer, Remove] = rabbit_ct_broker_helpers:get_node_configs(
+                                    Config, nodename),
+
+    stop_node(Config, DownServer),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    QQ = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', QQ, 0, 0},
+                 declare(Ch, QQ, [{<<"x-queue-type">>, longstr, <<"quorum">>}])),
+    timer:sleep(200),
+    ?assertEqual(ok, rpc:call(Server, rabbit_quorum_queue, delete_member,
+                              [<<"/">>, QQ, Remove])),
+
+    rabbit_ct_broker_helpers:start_node(Config, DownServer),
+    ?assertEqual(ok, rpc:call(Server, rabbit_quorum_queue, repair_amqqueue_nodes,
+                              [<<"/">>, QQ])),
+    ok.
 
 %% These tests check if node removal would cause any queues to lose (or not lose)
 %% their quorum. See rabbitmq/rabbitmq-cli#389 for background.

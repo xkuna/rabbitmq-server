@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(cluster_rename_SUITE).
@@ -266,7 +266,7 @@ do_rename_node(Config, Nodename, Map) ->
       || N <- Map
     ],
     Ret = rabbit_ct_broker_helpers:rabbitmqctl(Config, Nodename,
-      ["rename_cluster_node" | Map1]),
+      ["rename_cluster_node" | Map1], 120000),
     case Ret of
         {ok, _} ->
             Config1 = update_config_after_rename(Config, Map1),

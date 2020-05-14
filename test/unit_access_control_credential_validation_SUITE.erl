@@ -11,10 +11,10 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
--module(credential_validation_SUITE).
+-module(unit_access_control_credential_validation_SUITE).
 
 -compile(export_all).
 -include_lib("proper/include/proper.hrl").
@@ -125,7 +125,11 @@ min_length_fails(_Config) ->
     Pwd3 = crypto:strong_rand_bytes(10),
     ?assertMatch({error, _}, F(?USERNAME, Pwd3, 15)),
     Pwd4 = crypto:strong_rand_bytes(50),
-    ?assertMatch({error, _}, F(?USERNAME, Pwd4, 60)).
+    ?assertMatch({error, _}, F(?USERNAME, Pwd4, 60)),
+    Pwd5 = undefined,
+    ?assertMatch({error, _}, F(?USERNAME, Pwd5, 60)),
+    Pwd6 = <<"">>,
+    ?assertMatch({error, _}, F(?USERNAME, Pwd6, 60)).
 
 min_length_succeeds(_Config) ->
     F = fun rabbit_credential_validator_min_password_length:validate/3,

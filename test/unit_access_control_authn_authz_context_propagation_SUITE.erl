@@ -11,10 +11,10 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2019-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
--module(authn_authz_context_propagation_SUITE).
+-module(unit_access_control_authn_authz_context_propagation_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
@@ -75,7 +75,7 @@ end_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_finished(Config1, Testcase).
 
 %% -------------------------------------------------------------------
-%% Testcases.
+%% Test cases
 %% -------------------------------------------------------------------
 
 propagate_context_to_auth_backend(Config) ->

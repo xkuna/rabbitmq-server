@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_boot_steps).
@@ -44,21 +44,17 @@ find_steps(Apps) ->
     [Step || {App, _, _} = Step <- All, lists:member(App, Apps)].
 
 run_step(Attributes, AttributeName) ->
-    case [MFA || {Key, MFA} <- Attributes,
-                 Key =:= AttributeName] of
-        [] ->
-            ok;
-        MFAs ->
-            [begin
-              rabbit_log:debug("Applying MFA: M = ~s, F = ~s, A = ~p",
-                               [M, F, A]),
-              case apply(M,F,A) of
-                   ok              -> ok;
-                   {error, Reason} -> exit({error, Reason})
-               end
-            end || {M,F,A} <- MFAs],
-            ok
-    end.
+    [begin
+        rabbit_log:debug("Applying MFA: M = ~s, F = ~s, A = ~p",
+                        [M, F, A]),
+        case apply(M,F,A) of
+            ok              -> ok;
+            {error, Reason} -> exit({error, Reason})
+        end
+     end
+      || {Key, {M,F,A}} <- Attributes,
+          Key =:= AttributeName],
+    ok.
 
 vertices({AppName, _Module, Steps}) ->
     [{StepName, {AppName, StepName, Atts}} || {StepName, Atts} <- Steps].

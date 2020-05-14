@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% @doc Provides an easy to consume API for interacting with the {@link rabbit_fifo.}
@@ -46,7 +46,7 @@
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 
--define(SOFT_LIMIT, 256).
+-define(SOFT_LIMIT, 32).
 -define(TIMER_TIME, 10000).
 
 -type seq() :: non_neg_integer().
@@ -563,8 +563,8 @@ handle_ra_event(From, {applied, Seqs},
         _ ->
             {ok, State1, Actions}
     end;
-handle_ra_event(Leader, {machine, {delivery, _ConsumerTag, _} = Del}, State0) ->
-    handle_delivery(Leader, Del, State0);
+handle_ra_event(From, {machine, {delivery, _ConsumerTag, _} = Del}, State0) ->
+    handle_delivery(From, Del, State0);
 handle_ra_event(Leader, {machine, leader_change},
                 #state{leader = Leader} = State) ->
     %% leader already known
@@ -578,8 +578,6 @@ handle_ra_event(_From, {rejected, {not_leader, undefined, _Seq}}, State0) ->
     % TODO: how should these be handled? re-sent on timer or try random
     {ok, State0, []};
 handle_ra_event(_From, {rejected, {not_leader, Leader, Seq}}, State0) ->
-    % ?INFO("rabbit_fifo_client: rejected ~b not leader ~w leader: ~w~n",
-    %       [Seq, From, Leader]),
     State1 = State0#state{leader = Leader},
     State = resend(Seq, State1),
     {ok, State, []};
@@ -740,7 +738,7 @@ handle_delivery(Leader, {delivery, Tag, [{FstId, _} | _] = IdMsgs},
                 [] ->
                     {ok, State0, []};
                 IdMsgs2 ->
-                    handle_delivery(Leader, {delivery, Tag, IdMsgs2}, State0)
+                    handle_delivery(From, {delivery, Tag, IdMsgs2}, State0)
             end;
         C when FstId =:= 0 ->
             % the very first delivery

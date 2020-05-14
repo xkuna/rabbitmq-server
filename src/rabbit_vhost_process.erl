@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2017-2019 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2017-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% This module implements a vhost identity process.
@@ -59,11 +59,11 @@ init([VHost]) ->
         timer:send_interval(Interval, check_vhost),
         true = erlang:garbage_collect(),
         {ok, VHost}
-    catch _:Reason ->
+    catch _:Reason:Stacktrace ->
         rabbit_amqqueue:mark_local_durable_queues_stopped(VHost),
         rabbit_log:error("Unable to recover vhost ~p data. Reason ~p~n"
                          " Stacktrace ~p",
-                         [VHost, Reason, erlang:get_stacktrace()]),
+                         [VHost, Reason, Stacktrace]),
         {stop, Reason}
     end.
 

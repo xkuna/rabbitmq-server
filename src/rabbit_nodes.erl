@@ -12,12 +12,12 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_nodes).
 
--export([names/1, diagnostics/1, make/1, parts/1, cookie_hash/0,
+-export([names/1, diagnostics/1, make/1, make/2, parts/1, cookie_hash/0,
          is_running/2, is_process_running/2,
          cluster_name/0, set_cluster_name/1, set_cluster_name/2, ensure_epmd/0,
          all_running/0, name_type/0, running_count/0,
@@ -55,8 +55,11 @@ names(Hostname) ->
 diagnostics(Nodes) ->
     rabbit_nodes_common:diagnostics(Nodes).
 
-make(NodeStr) ->
-    rabbit_nodes_common:make(NodeStr).
+make(NameOrParts) ->
+    rabbit_nodes_common:make(NameOrParts).
+
+make(ShortName, Hostname) ->
+    make({ShortName, Hostname}).
 
 parts(NodeStr) ->
     rabbit_nodes_common:parts(NodeStr).

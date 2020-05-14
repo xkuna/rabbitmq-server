@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mnesia).
@@ -97,48 +97,70 @@ init() ->
     ok.
 
 init_with_lock() ->
-    {Retries, Timeout} = rabbit_peer_discovery:retry_timeout(),
-    init_with_lock(Retries, Timeout, fun init_from_config/0).
+    {Retries, Timeout} = rabbit_peer_discovery:locking_retry_timeout(),
+    init_with_lock(Retries, Timeout, fun run_peer_discovery/0).
 
-init_with_lock(0, _, InitFromConfig) ->
+init_with_lock(0, _, RunPeerDiscovery) ->
     case rabbit_peer_discovery:lock_acquisition_failure_mode() of
         ignore ->
-            rabbit_log:warning("Cannot acquire a lock during clustering", []),
-            InitFromConfig(),
+            rabbit_log:warning("Could not acquire a peer discovery lock, out of retries", []),
+            RunPeerDiscovery(),
             rabbit_peer_discovery:maybe_register();
         fail ->
             exit(cannot_acquire_startup_lock)
     end;
-init_with_lock(Retries, Timeout, InitFromConfig) ->
-    case rabbit_peer_discovery:lock() of
+init_with_lock(Retries, Timeout, RunPeerDiscovery) ->
+    LockResult = rabbit_peer_discovery:lock(),
+    rabbit_log:debug("rabbit_peer_discovery:lock returned ~p", [LockResult]),
+    case LockResult of
         not_supported ->
             rabbit_log:info("Peer discovery backend does not support locking, falling back to randomized delay"),
             %% See rabbitmq/rabbitmq-server#1202 for details.
             rabbit_peer_discovery:maybe_inject_randomized_delay(),
-            InitFromConfig(),
+            RunPeerDiscovery(),
             rabbit_peer_discovery:maybe_register();
         {error, _Reason} ->
             timer:sleep(Timeout),
-            init_with_lock(Retries - 1, Timeout, InitFromConfig);
+            init_with_lock(Retries - 1, Timeout, RunPeerDiscovery);
         {ok, Data} ->
             try
-                InitFromConfig(),
+                RunPeerDiscovery(),
+                rabbit_peer_discovery:maybe_register()
+            after
+                rabbit_peer_discovery:unlock(Data)
+            end;
+        Data when is_binary(Data) or is_list(Data) ->
+            try
+                RunPeerDiscovery(),
                 rabbit_peer_discovery:maybe_register()
             after
                 rabbit_peer_discovery:unlock(Data)
             end
     end.
 
-init_from_config() ->
+-spec run_peer_discovery() -> ok | {[node()], node_type()}.
+run_peer_discovery() ->
+    {RetriesLeft, DelayInterval} = rabbit_peer_discovery:discovery_retries(),
+    run_peer_discovery_with_retries(RetriesLeft, DelayInterval).
+
+-spec run_peer_discovery_with_retries(non_neg_integer(), non_neg_integer()) -> ok | {[node()], node_type()}.
+run_peer_discovery_with_retries(0, _DelayInterval) ->
+    ok;
+run_peer_discovery_with_retries(RetriesLeft, DelayInterval) ->
     FindBadNodeNames = fun
         (Name, BadNames) when is_atom(Name) -> BadNames;
         (Name, BadNames)                    -> [Name | BadNames]
     end,
-    {DiscoveredNodes, NodeType} =
+    {DiscoveredNodes0, NodeType} =
         case rabbit_peer_discovery:discover_cluster_nodes() of
+            {error, Reason} ->
+                RetriesLeft1 = RetriesLeft - 1,
+                rabbit_log:error("Peer discovery returned an error: ~p. Will retry after a delay of ~b, ~b retries left...",
+                                [Reason, DelayInterval, RetriesLeft1]),
+                timer:sleep(DelayInterval),
+                run_peer_discovery_with_retries(RetriesLeft1, DelayInterval);
             {ok, {Nodes, Type} = Config}
-              when is_list(Nodes) andalso
-                   (Type == disc orelse Type == disk orelse Type == ram) ->
+              when is_list(Nodes) andalso (Type == disc orelse Type == disk orelse Type == ram) ->
                 case lists:foldr(FindBadNodeNames, [], Nodes) of
                     []       -> Config;
                     BadNames -> e({invalid_cluster_node_names, BadNames})
@@ -148,6 +170,7 @@ init_from_config() ->
             {ok, _} ->
                 e(invalid_cluster_nodes_conf)
         end,
+    DiscoveredNodes = lists:usort(DiscoveredNodes0),
     rabbit_log:info("All discovered existing cluster peers: ~s~n",
                     [rabbit_peer_discovery:format_discovered_nodes(DiscoveredNodes)]),
     Peers = nodes_excl_me(DiscoveredNodes),
@@ -167,6 +190,16 @@ init_from_config() ->
 %% reachable and compatible (in terms of Mnesia internal protocol version and such)
 %% cluster peers in order.
 join_discovered_peers(TryNodes, NodeType) ->
+    {RetriesLeft, DelayInterval} = rabbit_peer_discovery:discovery_retries(),
+    join_discovered_peers_with_retries(TryNodes, NodeType, RetriesLeft, DelayInterval).
+
+join_discovered_peers_with_retries(TryNodes, _NodeType, 0, _DelayInterval) ->
+    rabbit_log:warning(
+              "Could not successfully contact any node of: ~s (as in Erlang distribution). "
+               "Starting as a blank standalone node...~n",
+                [string:join(lists:map(fun atom_to_list/1, TryNodes), ",")]),
+            init_db_and_upgrade([node()], disc, false, _Retry = true);
+join_discovered_peers_with_retries(TryNodes, NodeType, RetriesLeft, DelayInterval) ->
     case find_reachable_peer_to_cluster_with(nodes_excl_me(TryNodes)) of
         {ok, Node} ->
             rabbit_log:info("Node '~s' selected for auto-clustering~n", [Node]),
@@ -175,11 +208,11 @@ join_discovered_peers(TryNodes, NodeType) ->
             rabbit_connection_tracking:boot(),
             rabbit_node_monitor:notify_joined_cluster();
         none ->
-            rabbit_log:warning(
-              "Could not successfully contact any node of: ~s (as in Erlang distribution). "
-               "Starting as a blank standalone node...~n",
-                [string:join(lists:map(fun atom_to_list/1, TryNodes), ",")]),
-            init_db_and_upgrade([node()], disc, false, _Retry = true)
+            RetriesLeft1 = RetriesLeft - 1,
+            rabbit_log:error("Trying to join discovered peers failed. Will retry after a delay of ~b, ~b retries left...",
+                            [DelayInterval, RetriesLeft1]),
+            timer:sleep(DelayInterval),
+            join_discovered_peers_with_retries(TryNodes, NodeType, RetriesLeft1, DelayInterval)
     end.
 
 %% Make the node join a cluster. The node will be reset automatically

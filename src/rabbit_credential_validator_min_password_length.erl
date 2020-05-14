@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_credential_validator_min_password_length).
@@ -49,6 +49,9 @@ validate(Username, Password) ->
 
 -spec validate(rabbit_types:username(), rabbit_types:password(), integer()) -> 'ok' | {'error', string(), [any()]}.
 
+%% passwordless users
+validate(_Username, undefined, MinLength) ->
+    {error, rabbit_misc:format("minimum required password length is ~B", [MinLength])};
 validate(_Username, Password, MinLength) ->
     case size(Password) >= MinLength of
         true  -> ok;

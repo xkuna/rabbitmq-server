@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(clustering_management_SUITE).
@@ -26,16 +26,20 @@
 
 all() ->
     [
-      {group, unclustered},
-      {group, clustered}
+      {group, unclustered_2_nodes},
+      {group, unclustered_3_nodes},
+      {group, clustered_2_nodes},
+      {group, clustered_4_nodes}
     ].
 
 groups() ->
     [
-      {unclustered, [], [
+      {unclustered_2_nodes, [], [
           {cluster_size_2, [], [
-              erlang_config
-            ]},
+              classic_config_discovery_node_list
+            ]}
+        ]},
+      {unclustered_3_nodes, [], [
           {cluster_size_3, [], [
               join_and_part_cluster,
               join_cluster_bad_operations,
@@ -47,7 +51,7 @@ groups() ->
               force_reset_node
             ]}
         ]},
-      {clustered, [], [
+      {clustered_2_nodes, [], [
           {cluster_size_2, [], [
               forget_removes_things,
               reset_removes_things,
@@ -58,7 +62,9 @@ groups() ->
               await_running_count,
               start_with_invalid_schema_in_path,
               persistent_cluster_id
-            ]},
+            ]}
+        ]},
+      {clustered_4_nodes, [], [
           {cluster_size_4, [], [
               forget_promotes_offline_slave
             ]}
@@ -87,9 +93,13 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
-init_per_group(unclustered, Config) ->
+init_per_group(unclustered_2_nodes, Config) ->
     rabbit_ct_helpers:set_config(Config, [{rmq_nodes_clustered, false}]);
-init_per_group(clustered, Config) ->
+init_per_group(unclustered_3_nodes, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{rmq_nodes_clustered, false}]);
+init_per_group(clustered_2_nodes, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{rmq_nodes_clustered, true}]);
+init_per_group(clustered_4_nodes, Config) ->
     rabbit_ct_helpers:set_config(Config, [{rmq_nodes_clustered, true}]);
 init_per_group(cluster_size_2, Config) ->
     rabbit_ct_helpers:set_config(Config, [{rmq_nodes_count, 2}]);
@@ -157,7 +167,6 @@ persistent_cluster_id(Config) ->
     end.
 
 create_bad_schema(Rabbit, Hare, Config) ->
-
     {ok, RabbitMnesiaDir} = rpc:call(Rabbit, application, get_env, [mnesia, dir]),
     {ok, HareMnesiaDir} = rpc:call(Hare, application, get_env, [mnesia, dir]),
     %% Make sure we don't use the current dir:
@@ -579,7 +588,7 @@ update_cluster_nodes(Config) ->
     assert_not_clustered(Hare),
     assert_clustered([Rabbit, Bunny]).
 
-erlang_config(Config) ->
+classic_config_discovery_node_list(Config) ->
     [Rabbit, Hare] = cluster_members(Config),
 
     ok = stop_app(Hare),
@@ -597,26 +606,6 @@ erlang_config(Config) ->
     assert_cluster_status({[Rabbit, Hare], [Rabbit], [Rabbit, Hare]},
                           [Rabbit, Hare]),
 
-    %% Check having a stop_app'ed node around doesn't break completely.
-    ok = stop_app(Hare),
-    ok = reset(Hare),
-    ok = stop_app(Rabbit),
-    ok = rpc:call(Hare, application, set_env,
-                  [rabbit, cluster_nodes, {[Rabbit], disc}]),
-    ok = start_app(Hare),
-    ok = start_app(Rabbit),
-    assert_not_clustered(Hare),
-    assert_not_clustered(Rabbit),
-
-    %% We get a warning but we start anyway
-    ok = stop_app(Hare),
-    ok = reset(Hare),
-    ok = rpc:call(Hare, application, set_env,
-                  [rabbit, cluster_nodes, {[non@existent], disc}]),
-    ok = start_app(Hare),
-    assert_not_clustered(Hare),
-    assert_not_clustered(Rabbit),
-
     %% List of nodes [node()] is equivalent to {[node()], disk}
     ok = stop_app(Hare),
     ok = reset(Hare),
@@ -625,43 +614,9 @@ erlang_config(Config) ->
     ok = start_app(Hare),
     assert_clustered([Rabbit, Hare]),
 
-    %% If we use an invalid node type, the node fails to start.
-    %% The Erlang VM has stopped after previous rabbit app failure
-    rabbit_ct_broker_helpers:start_node(Config, Hare),
     ok = stop_app(Hare),
     ok = reset(Hare),
-    ok = rpc:call(Hare, application, set_env,
-                  [rabbit, cluster_nodes, {["Mike's computer"], disc}]),
-    %% Rabbit app stops abnormally, node goes down
-    assert_failure(fun () -> start_app(Hare) end),
-    assert_not_clustered(Rabbit),
-
-    %% If we use an invalid node type, the node fails to start.
-    %% The Erlang VM has stopped after previous rabbit app failure
-    rabbit_ct_broker_helpers:start_node(Config, Hare),
-    ok = stop_app(Hare),
-    ok = reset(Hare),
-    ok = rpc:call(Hare, application, set_env,
-                  [rabbit, cluster_nodes, {[Rabbit], blue}]),
-    %% Rabbit app stops abnormally, node goes down
-    assert_failure(fun () -> start_app(Hare) end),
-    assert_not_clustered(Rabbit),
-
     %% If we use an invalid cluster_nodes conf, the node fails to start.
-    %% The Erlang VM has stopped after previous rabbit app failure
-    rabbit_ct_broker_helpers:start_node(Config, Hare),
-    ok = stop_app(Hare),
-    ok = reset(Hare),
-    ok = rpc:call(Hare, application, set_env,
-                  [rabbit, cluster_nodes, true]),
-    %% Rabbit app stops abnormally, node goes down
-    assert_failure(fun () -> start_app(Hare) end),
-    assert_not_clustered(Rabbit),
-
-    %% The Erlang VM has stopped after previous rabbit app failure
-    rabbit_ct_broker_helpers:start_node(Config, Hare),
-    ok = stop_app(Hare),
-    ok = reset(Hare),
     ok = rpc:call(Hare, application, set_env,
                   [rabbit, cluster_nodes, "Yes, please"]),
     assert_failure(fun () -> start_app(Hare) end),

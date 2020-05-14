@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is Pivotal Software, Inc.
-%% Copyright (c) 2007-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_peer_discovery).
@@ -23,21 +23,28 @@
 -export([maybe_init/0, discover_cluster_nodes/0, backend/0, node_type/0,
          normalize/1, format_discovered_nodes/1, log_configured_backend/0,
          register/0, unregister/0, maybe_register/0, maybe_unregister/0,
-         maybe_inject_randomized_delay/0, lock/0, unlock/1]).
--export([append_node_prefix/1, node_prefix/0, retry_timeout/0,
+         maybe_inject_randomized_delay/0, lock/0, unlock/1,
+         discovery_retries/0]).
+-export([append_node_prefix/1, node_prefix/0, locking_retry_timeout/0,
          lock_acquisition_failure_mode/0]).
 
 -define(DEFAULT_BACKEND,   rabbit_peer_discovery_classic_config).
+
 %% what node type is used by default for this node when joining
 %% a new cluster as a virgin node
 -define(DEFAULT_NODE_TYPE, disc).
+
 %% default node prefix to attach to discovered hostnames
 -define(DEFAULT_PREFIX, "rabbit").
+
 %% default randomized delay range, in seconds
 -define(DEFAULT_STARTUP_RANDOMIZED_DELAY, {5, 60}).
 
--define(NODENAME_PART_SEPARATOR, "@").
+%% default discovery retries and interval.
+-define(DEFAULT_DISCOVERY_RETRY_COUNT, 10).
+-define(DEFAULT_DISCOVERY_RETRY_INTERVAL_MS, 500).
 
+-define(NODENAME_PART_SEPARATOR, "@").
 
 -spec backend() -> atom().
 
@@ -61,9 +68,9 @@ node_type() ->
       ?DEFAULT_NODE_TYPE
   end.
 
--spec retry_timeout() -> {Retries :: integer(), Timeout :: integer()}.
+-spec locking_retry_timeout() -> {Retries :: integer(), Timeout :: integer()}.
 
-retry_timeout() ->
+locking_retry_timeout() ->
     case application:get_env(rabbit, cluster_formation) of
         {ok, Proplist} ->
             Retries = proplists:get_value(lock_retry_limit, Proplist, 10),
@@ -90,18 +97,21 @@ log_configured_backend() ->
 
 maybe_init() ->
     Backend = backend(),
+    code:ensure_loaded(Backend),
     case erlang:function_exported(Backend, init, 0) of
         true  ->
-            rabbit_log:debug("Peer discovery backend supports initialisation."),
+            rabbit_log:debug("Peer discovery backend supports initialisation"),
             case Backend:init() of
                 ok ->
-                    rabbit_log:debug("Peer discovery backend initialisation succeeded."),
+                    rabbit_log:debug("Peer discovery backend initialisation succeeded"),
                     ok;
                 {error, Error} ->
                     rabbit_log:warning("Peer discovery backend initialisation failed: ~p.", [Error]),
                     ok
             end;
-        false -> ok
+        false ->
+            rabbit_log:debug("Peer discovery backend does not support initialisation"),
+            ok
     end.
 
 
@@ -145,6 +155,18 @@ maybe_unregister() ->
       rabbit_log:info("Peer discovery backend ~s does not support registration, skipping unregistration.", [Backend]),
       ok
   end.
+
+-spec discovery_retries() -> {Retries :: integer(), Interval :: integer()}.
+
+discovery_retries() ->
+    case application:get_env(rabbit, cluster_formation) of
+        {ok, Proplist} ->
+            Retries  = proplists:get_value(discovery_retry_limit,    Proplist, ?DEFAULT_DISCOVERY_RETRY_COUNT),
+            Interval = proplists:get_value(discovery_retry_interval, Proplist, ?DEFAULT_DISCOVERY_RETRY_INTERVAL_MS),
+            {Retries, Interval};
+        undefined ->
+            {?DEFAULT_DISCOVERY_RETRY_COUNT, ?DEFAULT_DISCOVERY_RETRY_INTERVAL_MS}
+    end.
 
 
 -spec maybe_inject_randomized_delay() -> ok.

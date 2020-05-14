@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_peer_discovery_classic_config).
@@ -26,7 +26,8 @@
 %% API
 %%
 
--spec list_nodes() -> {ok, {Nodes :: [node()], rabbit_types:node_type()}}.
+-spec list_nodes() -> {ok, {Nodes :: [node()], rabbit_types:node_type()}} |
+                      {error, Reason :: string()}.
 
 list_nodes() ->
     case application:get_env(rabbit, cluster_nodes, {[], disc}) of
@@ -37,7 +38,9 @@ list_nodes() ->
 -spec supports_registration() -> boolean().
 
 supports_registration() ->
-    false.
+    %% If we don't have any nodes configured, skip randomized delay and similar operations
+    %% as we don't want to delay startup for no reason. MK.
+    has_any_peer_nodes_configured().
 
 -spec register() -> ok.
 
@@ -63,3 +66,19 @@ lock(_Node) ->
 
 unlock(_Data) ->
     ok.
+
+%%
+%% Helpers
+%%
+
+has_any_peer_nodes_configured() ->
+    case application:get_env(rabbit, cluster_nodes, []) of
+        {[], _NodeType} ->
+            false;
+        {Nodes, _NodeType} when is_list(Nodes) ->
+            true;
+        [] ->
+            false;
+        Nodes when is_list(Nodes) ->
+            true
+    end.

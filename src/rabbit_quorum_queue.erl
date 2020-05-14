@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2018-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2018-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_quorum_queue).
@@ -51,6 +51,9 @@
          filter_quorum_critical/1, filter_quorum_critical/2,
          all_replica_states/0]).
 -export([is_policy_applicable/2]).
+-export([repair_amqqueue_nodes/1,
+         repair_amqqueue_nodes/2
+         ]).
 
 -export([is_enabled/0,
          declare/2]).
@@ -266,7 +269,7 @@ list_with_minimum_quorum() ->
     filter_quorum_critical(
       rabbit_amqqueue:list_local_quorum_queues()).
 
--spec list_with_minimum_quorum_for_cli() -> [amqqueue:amqqueue()].
+-spec list_with_minimum_quorum_for_cli() -> [#{binary() => term()}].
 list_with_minimum_quorum_for_cli() ->
     QQs = list_with_minimum_quorum(),
     [begin
@@ -396,7 +399,38 @@ repair_leader_record(QName, Self) ->
     end,
     ok.
 
+repair_amqqueue_nodes(VHost, QueueName) ->
+    QName = #resource{virtual_host = VHost, name = QueueName, kind = queue},
+    repair_amqqueue_nodes(QName).
 
+-spec repair_amqqueue_nodes(rabbit_types:r('queue') | amqqueue:amqqueue()) ->
+    ok | repaired.
+repair_amqqueue_nodes(QName = #resource{}) ->
+    {ok, Q0} = rabbit_amqqueue:lookup(QName),
+    repair_amqqueue_nodes(Q0);
+repair_amqqueue_nodes(Q0) ->
+    QName = amqqueue:get_name(Q0),
+    Leader = amqqueue:get_pid(Q0),
+    {ok, Members, _} = ra:members(Leader),
+    RaNodes = [N || {_, N} <- Members],
+    #{nodes := Nodes} = amqqueue:get_type_state(Q0),
+    case lists:sort(RaNodes) =:= lists:sort(Nodes) of
+        true ->
+            %% up to date
+            ok;
+        false ->
+            %% update amqqueue record
+            Fun = fun (Q) ->
+                          TS0 = amqqueue:get_type_state(Q),
+                          TS = TS0#{nodes => RaNodes},
+                          amqqueue:set_type_state(Q, TS)
+                  end,
+            rabbit_misc:execute_mnesia_transaction(
+              fun() ->
+                      rabbit_amqqueue:update(QName, Fun)
+              end),
+            repaired
+    end.
 
 reductions(Name) ->
     try
@@ -915,8 +949,8 @@ delete_member(Q, Node) when ?amqqueue_is_quorum(Q) ->
             %% deleting the last member is not allowed
             {error, last_node};
         Members ->
-            case ra:leave_and_delete_server(Members, ServerId) of
-                ok ->
+            case ra:remove_member(Members, ServerId) of
+                {ok, _, _Leader} ->
                     Fun = fun(Q1) ->
                                   update_type_state(
                                     Q1,
@@ -926,8 +960,15 @@ delete_member(Q, Node) when ?amqqueue_is_quorum(Q) ->
                           end,
                     rabbit_misc:execute_mnesia_transaction(
                       fun() -> rabbit_amqqueue:update(QName, Fun) end),
-                    ok;
-                timeout ->
+                    case ra:force_delete_server(ServerId) of
+                        ok ->
+                            ok;
+                        {error, _} = Err ->
+                            Err;
+                        Err ->
+                            {error, Err}
+                    end;
+                {timeout, _} ->
                     {error, timeout};
                 E ->
                     E

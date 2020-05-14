@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2020 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_channel).
@@ -122,7 +122,9 @@
           %% Message content size limit
           max_message_size,
           consumer_timeout,
-          authz_context
+          authz_context,
+          %% defines how ofter gc will be executed
+          writer_gc_threshold
          }).
 
 -record(pending_ack, {delivery_tag,
@@ -173,9 +175,7 @@
              delivery_flow,
              interceptor_state,
              queue_states,
-             tick_timer,
-             %% defines how ofter gc will be executed
-             writer_gc_threshold
+             tick_timer
             }).
 
 -define(QUEUE, lqueue).
@@ -531,7 +531,8 @@ init([Channel, ReaderPid, WriterPid, ConnPid, ConnName, Protocol, User, VHost,
                             consumer_prefetch = Prefetch,
                             max_message_size = MaxMessageSize,
                             consumer_timeout = ConsumerTimeout,
-                            authz_context = OptionalVariables
+                            authz_context = OptionalVariables,
+                            writer_gc_threshold = GCThreshold
                            },
                 limiter = Limiter,
                 tx                      = none,
@@ -549,7 +550,6 @@ init([Channel, ReaderPid, WriterPid, ConnPid, ConnName, Protocol, User, VHost,
                 reply_consumer          = none,
                 delivery_flow           = Flow,
                 interceptor_state       = undefined,
-                writer_gc_threshold     = GCThreshold,
                 queue_states            = rabbit_queue_type:init()
                },
     State1 = State#ch{
@@ -651,8 +651,8 @@ handle_cast({method, Method, Content, Flow},
         exit:Reason = #amqp_error{} ->
             MethodName = rabbit_misc:method_record_type(Method),
             handle_exception(Reason#amqp_error{method = MethodName}, State);
-        _:Reason ->
-            {stop, {Reason, erlang:get_stacktrace()}, State}
+        _:Reason:Stacktrace ->
+            {stop, {Reason, Stacktrace}, State}
     end;
 
 handle_cast(ready_for_close,
@@ -1297,12 +1297,12 @@ handle_method(#'basic.publish'{exchange    = ExchangeNameBin,
                                                user = #user{username = Username} = User,
                                                trace_state = TraceState,
                                                max_message_size = MaxMessageSize,
-                                               authz_context = AuthzContext
+                                               authz_context = AuthzContext,
+                                               writer_gc_threshold = GCThreshold
                                               },
                                    tx               = Tx,
                                    confirm_enabled  = ConfirmEnabled,
-                                   delivery_flow    = Flow,
-                                   writer_gc_threshold     = GCThreshold
+                                   delivery_flow    = Flow
                                    }) ->
     check_msg_size(Content, MaxMessageSize, GCThreshold),
     ExchangeName = rabbit_misc:r(VHostPath, exchange, ExchangeNameBin),
@@ -2699,9 +2699,9 @@ handle_deliver0(ConsumerTag, AckRequired,
                       #basic_message{exchange_name = ExchangeName,
                                      routing_keys  = [RoutingKey | _CcRoutes],
                                      content       = Content}},
-               State = #ch{cfg = #conf{writer_pid = WriterPid},
-                           next_tag   = DeliveryTag,
-                           writer_gc_threshold = GCThreshold}) ->
+               State = #ch{cfg = #conf{writer_pid = WriterPid,
+                                       writer_gc_threshold = GCThreshold},
+                           next_tag   = DeliveryTag}) ->
     Deliver = #'basic.deliver'{consumer_tag = ConsumerTag,
                                delivery_tag = DeliveryTag,
                                redelivered  = Redelivered,

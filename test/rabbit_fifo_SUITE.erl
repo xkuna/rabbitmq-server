@@ -295,6 +295,27 @@ return_test(_) ->
                                                            State3#rabbit_fifo.consumers),
     ok.
 
+return_dequeue_delivery_limit_test(_) ->
+    Init = init(#{name => test,
+                  queue_resource => rabbit_misc:r("/", queue,
+                                                  atom_to_binary(test, utf8)),
+                  release_cursor_interval => 0,
+                  delivery_limit => 1}),
+    {State0, _} = enq(1, 1, msg, Init),
+
+    Cid = {<<"cid">>, self()},
+    Cid2 = {<<"cid2">>, self()},
+
+    {State1, {MsgId1, _}} = deq(2, Cid, unsettled, State0),
+    {State2, _, _} = apply(meta(4), rabbit_fifo:make_return(Cid, [MsgId1]),
+                           State1),
+
+    {State3, {MsgId2, _}} = deq(2, Cid2, unsettled, State2),
+    {State4, _, _} = apply(meta(4), rabbit_fifo:make_return(Cid2, [MsgId2]),
+                           State3),
+    ?assertMatch(#{num_messages := 0}, rabbit_fifo:overview(State4)),
+    ok.
+
 return_non_existent_test(_) ->
     Cid = {<<"cid">>, self()},
     {State0, [_, _Inactive]} = enq(1, 1, second, test_init(test)),
@@ -329,7 +350,7 @@ return_checked_out_limit_test(_) ->
     {State2, ok, [{send_msg, _, {delivery, _, [{MsgId2, _}]}, _},
                   {aux, active}]} =
         apply(meta(3), rabbit_fifo:make_return(Cid, [MsgId]), State1),
-    {#rabbit_fifo{ra_indexes = RaIdxs}, ok, []} =
+    {#rabbit_fifo{ra_indexes = RaIdxs}, ok, [_ReleaseEff]} =
         apply(meta(4), rabbit_fifo:make_return(Cid, [MsgId2]), State2),
     ?assertEqual(0, rabbit_fifo_index:size(RaIdxs)),
     ok.
@@ -453,7 +474,7 @@ discarded_message_without_dead_letter_handler_is_removed_test(_) ->
                     Effects2),
     ok.
 
-discarded_message_with_dead_letter_handler_emits_mod_call_effect_test(_) ->
+discarded_message_with_dead_letter_handler_emits_log_effect_test(_) ->
     Cid = {<<"completed_consumer_yields_demonitor_effect_test">>, self()},
     State00 = init(#{name => test,
                      queue_resource => rabbit_misc:r(<<"/">>, queue, <<"test">>),
@@ -466,8 +487,7 @@ discarded_message_with_dead_letter_handler_emits_mod_call_effect_test(_) ->
                 Effects1),
     {_State2, _, Effects2} = apply(meta(1), rabbit_fifo:make_discard(Cid, [0]), State1),
     % assert mod call effect with appended reason and message
-    ?ASSERT_EFF({mod_call, somemod, somefun, [somearg, [{rejected, first}]]},
-                Effects2),
+    ?ASSERT_EFF({log, _RaftIdxs, _}, Effects2),
     ok.
 
 tick_test(_) ->
@@ -1354,12 +1374,15 @@ aux_test(_) ->
     MacState = init(#{name => aux_test,
                       queue_resource =>
                       rabbit_misc:r(<<"/">>, queue, <<"test">>)}),
-    Log = undefined,
-    {no_reply, Aux, undefined} = handle_aux(leader, cast, active, Aux0,
+    ok = meck:new(ra_log, []),
+    Log = mock_log,
+    meck:expect(ra_log, last_index_term, fun (_) -> {0, 0} end),
+    {no_reply, Aux, mock_log} = handle_aux(leader, cast, active, Aux0,
                                             Log, MacState),
-    {no_reply, _Aux, undefined} = handle_aux(leader, cast, tick, Aux,
+    {no_reply, _Aux, mock_log} = handle_aux(leader, cast, tick, Aux,
                                              Log, MacState),
     [X] = ets:lookup(rabbit_fifo_usage, aux_test),
+    meck:unload(),
     ?assert(X > 0.0),
     ok.
 
