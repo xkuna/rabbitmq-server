@@ -36,7 +36,7 @@
          phase_delete_cluster/3,
          phase_check_quorum/2,
          phase_start_new_leader/1,
-         phase_restart_replicas/1,
+         phase_stop_replicas/1,
          phase_start_replica/3,
          phase_delete_replica/3]).
 
@@ -44,7 +44,7 @@
 
 -define(STREAM_COORDINATOR_STARTUP, {stream_coordinator_startup, self()}).
 
--record(?MODULE, {streams}).
+-record(?MODULE, {streams, monitors}).
 
 start() ->
     Nodes = rabbit_mnesia:cluster_nodes(all),
@@ -105,7 +105,8 @@ delete_replica(Name, Node) ->
     ra:process_command(Server, {delete_replica, Name, Node}).
 
 init(_Conf) ->
-    #?MODULE{streams = #{}}.
+    #?MODULE{streams = #{},
+             monitors = #{}}.
 
 apply(#{from := From}, {start_cluster, Q}, #?MODULE{streams = Streams} = State) ->
     #{name := StreamId} = Conf = amqqueue:get_type_state(Q),
@@ -116,17 +117,21 @@ apply(#{from := From}, {start_cluster, Q}, #?MODULE{streams = Streams} = State) 
             {State#?MODULE{streams = maps:put(StreamId, Q, Streams)}, '$ra_no_reply', 
              [{aux, {phase, StreamId, phase_start_cluster, [From, Conf]}}]}
     end;
-apply(_Meta, {start_cluster_reply, StreamId, From, {ok, #{leader_pid := LeaderPid} = Conf}},
-      #?MODULE{streams = Streams} = State) ->
+apply(_Meta, {start_cluster_reply, StreamId, From, {ok, #{leader_pid := LeaderPid,
+                                                          replica_pids := ReplicaPids} = Conf}},
+      #?MODULE{streams = Streams,
+               monitors = Monitors0} = State) ->
     Q0 = maps:get(StreamId, Streams),
     Q = amqqueue:set_type_state(amqqueue:set_pid(Q0, LeaderPid), Conf),
-    {State#?MODULE{streams = maps:put(StreamId, Conf, Streams)}, ok,
-     [{monitor, process, LeaderPid},
-      {aux, {phase, StreamId, phase_repair_mnesia, [From, new, Q]}}]};
-apply(_Meta, {start_cluster_reply, StreamId, From, {error, {already_started, _}}},
-      #?MODULE{streams = Streams} = State) ->
-    {State#?MODULE{streams = maps:remove(StreamId, Streams)}, ok,
-     [{reply, From, {error, already_started}}]};
+    Monitors = lists:foldl(fun(Pid, M) ->
+                                   maps:put(Pid, {StreamId, follower}, M)
+                           end, Monitors0, ReplicaPids),
+    {State#?MODULE{streams = maps:put(StreamId, Conf, Streams),
+                   monitors = maps:put(LeaderPid, {StreamId, leader}, Monitors)}, ok,
+     [{monitor, process, LeaderPid}] ++ [{monitor, process, Pid} || Pid <- ReplicaPids] ++
+     [{aux, {phase, StreamId, phase_repair_mnesia, [From, new, Q]}}]};
+apply(_Meta, {start_cluster_reply, _StreamId, From, {error, {{already_started, _}, _}}}, State) ->
+    {State, ok, [{reply, From, {error, already_started}}]};
 apply(#{from := From}, {start_replica, StreamId, Node}, #?MODULE{streams = Streams} = State) ->
     case maps:get(StreamId, Streams, undefined) of
         undefined ->
@@ -135,34 +140,68 @@ apply(#{from := From}, {start_replica, StreamId, Node}, #?MODULE{streams = Strea
             {State, '$ra_no_reply', [{aux, {phase, StreamId, phase_start_replica,
                                             [From, Node, Conf]}}]}
     end;
-apply(#{from := From}, {delete_replica, StreamId, Node}, #?MODULE{streams = Streams} = State) ->
+apply(#{from := From}, {delete_replica, StreamId, Node},
+      #?MODULE{streams = Streams,
+               monitors = Monitors} = State) ->
     case maps:get(StreamId, Streams, undefined) of
         undefined ->
             {State, '$ra_no_reply', [{reply, From, {error, not_found}}]};
-        Conf ->
-            Replicas = maps:get(replica_nodes, Conf),
-            case lists:member(Node, Replicas) of
+        Conf0 ->
+            Replicas0 = maps:get(replica_nodes, Conf0),
+            ReplicaPids0 = maps:get(replica_pids, Conf0),
+            case lists:member(Node, Replicas0) of
                 false ->
                     {State, '$ra_no_reply', [{reply, From, ok}]};
                 true ->
-                    {State, '$ra_no_reply', [{aux, {phase, StreamId, phase_delete_replica,
-                                                    [From, Node, Conf]}}]}
+                    Pid = lists:filter(fun(P) -> node(P) == Node end, ReplicaPids0),
+                    ReplicaPids = lists:delete(Pid, ReplicaPids0),
+                    Replicas = lists:delete(Node, Replicas0),
+                    Conf = maps:put(replica_pids, ReplicaPids,
+                                    maps:put(replica_nodes, Replicas, Conf0)),
+                    {State#?MODULE{monitors = maps:remove(Pid, Monitors),
+                                   streams = maps:put(StreamId, Conf, Streams)},
+                     '$ra_no_reply',
+                     [{aux, {phase, StreamId, phase_delete_replica, [From, Node, Conf]}}]}
             end
     end;
-apply(#{from := From}, {delete_cluster, StreamId, ActingUser}, #?MODULE{streams = Streams} = State) ->
+apply(#{from := From}, {delete_cluster, StreamId, ActingUser},
+      #?MODULE{streams = Streams,
+               monitors = Monitors0} = State) ->
     case maps:get(StreamId, Streams, undefined) of
         undefined ->
             {State, '$ra_no_reply', [{reply, From, {ok, 0}}]};
         Conf ->
-            {State, '$ra_no_reply', [{aux, {phase, StreamId, phase_delete_cluster,
-                                            [From, Conf, ActingUser]}}]}
+            ReplicaPids = maps:get(replica_pids, Conf),
+            LeaderPid = maps:get(leader_pid, Conf),
+            Monitors = lists:foldl(fun(Pid, M) ->
+                                           maps:remove(Pid, M)
+                                   end, Monitors0, ReplicaPids ++ [LeaderPid]),
+            {State#?MODULE{monitors = Monitors,
+                           streams = maps:remove(StreamId, Streams)}, '$ra_no_reply',
+             [{aux, {phase, StreamId, phase_delete_cluster, [From, Conf, ActingUser]}}]}
     end;
-apply(_Meta, {delete_cluster_reply, StreamId, From}, #?MODULE{streams = Streams} = State) ->
+apply(_Meta, {delete_cluster_reply, _StreamId, From}, State) ->
     %% TODO return number of ready messages
-    {State#?MODULE{streams = maps:remove(StreamId, Streams)}, ok, [{reply, From, {ok, 0}}]};
-apply(_Meta, {down, Pid, _Reason}, #?MODULE{streams = Streams} = State) ->
-    {StreamId, Conf} = find_stream(Pid, Streams),
-    {State, ok, [{aux, {phase, StreamId, phase_check_quorum, [StreamId, Conf]}}]};
+    {State, ok, [{reply, From, {ok, 0}}]};
+apply(_Meta, {down, Pid, _Reason}, #?MODULE{streams = Streams,
+                                            monitors = Monitors} = State) ->
+    case maps:get(Pid, Monitors, undefined) of
+        {StreamId, leader} ->
+            Conf = maps:get(StreamId, Streams),
+            {State#?MODULE{monitors = maps:remove(Pid, Monitors)},
+             ok, [{aux, {phase, StreamId, phase_check_quorum, [StreamId, Conf]}}]};
+        {StreamId, follower} ->
+            Conf0 = maps:get(StreamId, Streams),
+            ReplicaPids = maps:get(replica_pids, Conf0),
+            Conf = maps:put(replica_pids, lists:delete(Pid, ReplicaPids), Conf0),
+            Node = node(Pid),
+            {State#?MODULE{monitors = maps:remove(Pid, Monitors)}, ok,
+             [{aux, {phase, StreamId, phase_start_replica, [undefined, Node, Conf]}}]};
+        {_, stopping} ->
+            {State#?MODULE{monitors = maps:remove(Pid, Monitors)}, ok, []};
+        undefined ->
+            {State, ok, []}
+    end;
 apply(_Meta, {start_leader_election, StreamId, NewEpoch, Offsets},
       #?MODULE{streams = Streams} = State) ->
     #{leader_node := Leader,
@@ -173,21 +212,37 @@ apply(_Meta, {start_leader_election, StreamId, NewEpoch, Offsets},
                        maps:put(leader_node, NewLeader, Conf)),
     {State#?MODULE{streams = maps:put(StreamId, Conf, Streams)}, ok,
      [{aux, {phase, StreamId, phase_start_new_leader, [NewConf]}}]};
-apply(_Meta, {restart_replicas, #{name := StreamId} = Conf}, #?MODULE{streams = Streams} = State) ->
-    {State#?MODULE{streams = maps:put(StreamId, Conf, Streams)}, ok,
-     [{aux, {phase, StreamId, phase_restart_replicas, [Conf]}}]};
-apply(_Meta, {stream_updated, From, #{name := StreamId} = Conf},
-      #?MODULE{streams = Streams} = State) ->
+apply(_Meta, {restart_replicas, #{name := StreamId,
+                                 leader_pid := LeaderPid} = Conf},
+      #?MODULE{streams = Streams,
+               monitors = Monitors} = State) ->
+    {State#?MODULE{streams = maps:put(StreamId, Conf, Streams),
+                   monitors = maps:put(LeaderPid, {StreamId, leader}, Monitors)}, ok,
+     [{monitor, process, LeaderPid}, {aux, {phase, StreamId, phase_stop_replicas, [Conf]}}]};
+apply(_Meta, {stream_updated, From, #{name := StreamId} = Conf}, #?MODULE{streams = Streams} = State) ->
     MaybeReply = case From of
                      undefined -> [];
                      _ -> [{reply, From, ok}]
                  end,
     {State#?MODULE{streams = maps:put(StreamId, Conf, Streams)}, ok,
-     [{aux, {phase, StreamId, phase_repair_mnesia, [update, Conf]}}] ++ MaybeReply}.
+     [{aux, {phase, StreamId, phase_repair_mnesia, [update, Conf]}}] ++ MaybeReply};
+apply(_Meta, {stream_updated, From, {Pid, Type}, #{name := StreamId} = Conf},
+      #?MODULE{streams = Streams,
+               monitors = Monitors} = State) ->
+    MaybeReply = case From of
+                     undefined -> [];
+                     _ -> [{reply, From, ok}]
+                 end,
+    {State#?MODULE{streams = maps:put(StreamId, Conf, Streams),
+                   monitors = maps:put(Pid, {StreamId, Type}, Monitors)}, ok,
+     [{monitor, process, Pid},
+      {aux, {phase, StreamId, phase_repair_mnesia, [update, Conf]}}] ++ MaybeReply}.
 
 state_enter(leader, #?MODULE{streams = Streams}) ->
     maps:fold(fun(_, Conf, Acc) ->
-                      [{monitor, process, maps:get(leader_pid, Conf)} | Acc]
+                      [{monitor, process, maps:get(leader_pid, Conf)}] ++
+                          [{monitor, process, Pid} || Pid <- maps:get(replica_pids, Conf)] ++
+                          Acc
               end, [], Streams);
 state_enter(_, _) ->
     [].
@@ -198,63 +253,47 @@ init_aux(_Name) ->
 %% TODO ensure the dead writer is restarted as a replica at some point in time, increasing timeout?
 handle_aux(leader, _, {phase, StreamId, Fun, Args} = Cmd, {Monitors, Streams, Pending}, LogState, _) ->
     case maps:get(StreamId, Streams, undefined) of
-        {Fun, _} ->
-            {no_reply, {Monitors, Streams, Pending}, LogState};
-        {_, _} when Fun == phase_start_replica; Fun == phase_delete_replica ->
+        {_, _} when Fun == phase_start_cluster; Fun == phase_start_replica; Fun == phase_delete_replica;
+                    Fun == phase_delete_cluster ->
             UpdateFun = fun(Cmds) -> Cmds ++ [Cmd] end,
             {no_reply, {Monitors, Streams, maps:update_with(StreamId, UpdateFun, [Cmd], Pending)},
              LogState};
-        _Other ->
-            %% TODO should we check order of phases?
+        _ ->
             Pid = erlang:apply(?MODULE, Fun, Args),
             {no_reply,
              {maps:put(Pid, StreamId, Monitors), maps:put(StreamId, {Fun, Args}, Streams), Pending},
              LogState, [{monitor, process, aux, Pid}]}
     end;
-handle_aux(_, _, {down, Pid, normal}, {Monitors0, Streams0, Pending}, LogState, _) ->
+handle_aux(leader, _, {down, Pid, normal}, {Monitors0, Streams0, Pending}, LogState, _) ->
     StreamId = maps:get(Pid, Monitors0),
     Monitors = maps:remove(Pid, Monitors0),
-    %% Check if we're in the last phase so we can clean up the state
-    Streams = case maps:get(StreamId, Streams0) of
-                  {Phase, _} when Phase == phase_delete_cluster;
-                                  Phase == phase_repair_mnesia ->
-                      maps:remove(StreamId, Streams0);
-                  _ ->
-                      Streams0
-              end,
-    case maps:get(StreamId, Pending, []) of
-        [] ->
-            {no_reply, {Monitors, Streams, Pending}, LogState};
-        [{phase, StreamId, Fun, Args} | Cmds] ->
-            Pid = erlang:apply(?MODULE, Fun, Args),
-            {no_reply,
-             {maps:put(Pid, StreamId, Monitors), maps:put(StreamId, {Fun, Args}, Streams),
-              maps:put(StreamId, Cmds, Pending)}, LogState, [{monitor, process, aux, Pid}]}
+    case maps:get(StreamId, Streams0) of
+        {Phase, _} when Phase == phase_delete_cluster;
+                        Phase == phase_repair_mnesia ->
+            Streams = maps:remove(StreamId, Streams0),
+            case maps:get(StreamId, Pending, []) of
+                [] ->
+                    {no_reply, {Monitors, Streams, Pending}, LogState};
+                [{phase, StreamId, Fun, Args} | Cmds] ->
+                    NewPid = erlang:apply(?MODULE, Fun, Args),
+                    {no_reply,
+                     {maps:put(NewPid, StreamId, Monitors), maps:put(StreamId, {Fun, Args}, Streams),
+                      maps:put(StreamId, Cmds, Pending)}, LogState, [{monitor, process, aux, NewPid}]}
+            end;
+        _ ->
+            {no_reply, {Monitors, Streams0, Pending}, LogState}
     end;
-handle_aux(_, _, {down, Pid, _}, {Monitors0, Streams, Pending}, LogState, _) ->
+handle_aux(leader, _, {down, Pid, _}, {Monitors0, Streams, Pending}, LogState, _) ->
     %% The phase has failed, let's retry it
     StreamId = maps:get(Pid, Monitors0),
     {Fun, Args} = maps:get(StreamId, Streams),
+    rabbit_log:warning("Error while executing coordinator phase ~p for stream queue ~p",
+                       [Fun, StreamId]),
     NewPid = erlang:apply(?MODULE, Fun, Args),
     Monitors = maps:put(NewPid, StreamId, maps:remove(Pid, Monitors0)),
     {no_reply, {Monitors, Streams, Pending}, LogState};
 handle_aux(_, _, _, AuxState, LogState, _) ->
     {no_reply, AuxState, LogState}.
-
-find_stream(Pid, Streams) ->
-    Iterator = maps:iterator(Streams),
-    find_stream0(Pid, Iterator).
-
-find_stream0(Pid, Iterator0) ->
-    case maps:next(Iterator0) of
-        {StreamId, #{leader_pid := Pid} = Conf, _} ->
-            {StreamId, Conf};
-        {_, _, Iterator} ->
-            find_stream0(Pid, Iterator);
-        none ->
-            %% TODO this shouldn't happen
-            exit(stream_not_found)
-    end.
 
 phase_start_replica(From, Node, #{replica_nodes := Replicas0,
                                  replica_pids := ReplicaPids0} = Conf0) ->
@@ -262,70 +301,67 @@ phase_start_replica(From, Node, #{replica_nodes := Replicas0,
       fun() ->
               %% TODO start replica could fail and this enter an infinity loop.
               %% We should retry but not block
-              %% TODO this could return {error, already_present} or {error, {already_started, _}}
+              %% If a new leader hasn't yet been elected, this will fail with a badmatch
+              %% as get_reader_context returns a no proc. An unhandled failure will
+              %% crash this monitored process and restart it later.
+              %% TODO However, do we want that crash in the log? We might need to try/catch
+              %% to provide a log message instead as it's 'expected'. We could try to
+              %% verify first that the leader is alive, but there would still be potential
+              %% for a race condition in here.
               case osiris_replica:start(Node, Conf0) of
                   {ok, Pid} ->
                       ReplicaPids = [Pid | ReplicaPids0],
                       Replicas = [Node | Replicas0],
                       Conf = maps:put(replica_pids, ReplicaPids,
                                       maps:put(replica_nodes, Replicas, Conf0)),
-                      ra:pipeline_command({?MODULE, node()}, {stream_updated, From, Conf});
+                      ra:pipeline_command({?MODULE, node()},
+                                          {stream_updated, From, {Pid, follower}, Conf});
                   {error, already_present} ->
                       gen_statem:reply(From, ok);
-                  {error, {already_started, Pid}} ->
-                      %% The Pid might have changed, let's update it
-                      ReplicaPids = [Pid | lists:filter(fun(P) ->
-                                                                node(P) =/= Node
-                                                        end, ReplicaPids0)],
-                      Conf = maps:put(replica_pids, ReplicaPids, Conf0),
-                      ra:pipeline_command({?MODULE, node()}, {stream_updated, From, Conf});
-                  {error, _} ->
+                  {error, {already_started, _}} ->
+                      gen_statem:reply(From, ok);
+                  {error, Reason} ->
                       %% TODO what to do?
+                      rabbit_log:warning("Error while starting replica for ~p : ~p",
+                                         [maps:get(name, Conf0), Reason]),
                       ok
               end
       end).
 
-phase_delete_replica(From, Node, #{replica_nodes := Replicas0,
-                                   replica_pids := ReplicaPids0} = Conf0) ->
+phase_delete_replica(From, Node, Conf) ->
     spawn(
       fun() ->
-              ok = osiris_replica:delete(Node, Conf0),
-              ReplicaPids = lists:filter(fun(Pid) ->
-                                                 node(Pid) =/= Node
-                                         end, ReplicaPids0),
-              Replicas = lists:delete(Node, Replicas0),
-              Conf = maps:put(replica_pids, ReplicaPids,
-                              maps:put(replica_nodes, Replicas, Conf0)),
+              ok = osiris_replica:delete(Node, Conf),
               ra:pipeline_command({?MODULE, node()}, {stream_updated, From, Conf})
       end).
 
-phase_restart_replicas(#{replica_nodes := Replicas} = Conf) ->
+phase_stop_replicas(#{replica_nodes := Replicas} = Conf) ->
     spawn(
       fun() ->
-              ReplicaPids = lists:foldl(fun(Node, Acc) ->
-                                                try
-                                                    ok = osiris_replica:stop(Node, Conf),
-                                                    {ok, Pid} = osiris_replica:start(Node, Conf),
-                                                    [Pid | Acc]
-                                                catch
-                                                    _:_ ->
-                                                        %% TODO log here
-                                                        %% Node down as the leader that just went
-                                                        %% down is now in the replica list
-                                                        Acc
-                                                end
-                                        end, [], Replicas),
-              ra:pipeline_command({?MODULE, node()},
-                                  {stream_updated, undefined, maps:put(replica_pids, ReplicaPids, Conf)})
+              [try
+                   osiris_replica:stop(Node, Conf)
+               catch _:{{nodedown, _}, _} ->
+                       %% It could be the old leader that is still down, it's normal.
+                       ok
+               end  || Node <- Replicas],
+              ra:pipeline_command({?MODULE, node()}, {stream_updated, undefined, Conf})
       end).
 
 phase_start_new_leader(#{leader_node := Node} = Conf) ->
     spawn(fun() ->
                   osiris_replica:stop(Node, Conf),
                   %% If the start fails, the monitor will capture the crash and restart it
-                  {ok, Pid} = osiris_writer:start(Conf),
-                  ra:pipeline_command({?MODULE, node()},
-                                      {restart_replicas, maps:put(leader_pid, Pid, Conf)})
+                  case osiris_writer:start(Conf) of
+                      {ok, Pid} ->
+                          ra:pipeline_command({?MODULE, node()},
+                                              {restart_replicas, maps:put(leader_pid, Pid, Conf)});
+                      {error, already_present} ->
+                          ra:pipeline_command({?MODULE, node()},
+                                              {restart_replicas, Conf});
+                      {error, {already_started, Pid}} ->
+                          ra:pipeline_command({?MODULE, node()},
+                                              {restart_replicas, maps:put(leader_pid, Pid, Conf)})
+                  end
           end).
 
 phase_check_quorum(StreamId, #{epoch := Epoch,

@@ -38,12 +38,13 @@ groups() ->
     [
      {single_node, [], all_tests()},
      {cluster_size_2, [], all_tests()},
-     {cluster_size_3, [], all_tests() ++ [delete_replica,
-                                          delete_down_replica,
-                                          delete_classic_replica,
-                                          delete_quorum_replica,
-                                          consume_from_replica,
-                                          leader_failover]},
+     {cluster_size_3, [], all_tests() ++
+          [delete_replica,
+           delete_down_replica,
+           delete_classic_replica,
+           delete_quorum_replica,
+           consume_from_replica,
+           leader_failover]},
      {unclustered_size_3_1, [], [add_replica]},
      {unclustered_size_3_2, [], [consume_without_local_replica]}
     ].
@@ -400,7 +401,10 @@ delete_down_replica(Config) ->
                           [<<"/">>, Q, Server1])),
     %% check it isn't gone
     check_leader_and_replicas(Config, Q, Server0, [Server1, Server2]),
-    ok = rabbit_ct_broker_helpers:start_node(Config, Server1).
+    ok = rabbit_ct_broker_helpers:start_node(Config, Server1),
+    ?assertEqual(ok,
+                 rpc:call(Server0, rabbit_stream_queue, delete_replica,
+                          [<<"/">>, Q, Server1])).
 
 publish(Config) ->
     [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
@@ -967,7 +971,7 @@ leader_failover(Config) ->
 %%----------------------------------------------------------------------------
 
 delete_queues() ->
-    [rabbit_amqqueue:delete(Q, false, false, <<"dummy">>)
+    [{ok, _} = rabbit_amqqueue:delete(Q, false, false, <<"dummy">>)
      || Q <- rabbit_amqqueue:list()].
 
 declare(Ch, Q) ->

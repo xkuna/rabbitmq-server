@@ -776,7 +776,7 @@ cleanup_data_dir() ->
                 lists:member(node(), get_nodes(Q))],
     _NoQQClusters = rabbit_ra_registry:list_not_quorum_clusters(),
     Registered = ra_directory:list_registered(),
-    Running = Names ++ Registered,
+    Running = Names ++ NoQQClusters,
     _ = [maybe_delete_data_dir(UId) || {Name, UId} <- Registered,
                                        not lists:member(Name, Running)],
     ok.
