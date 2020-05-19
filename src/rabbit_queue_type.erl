@@ -149,7 +149,7 @@
                  term(),
                  rabbit_types:username(),
                  queue_state()) ->
-    {ok, queue_state(), actions()} | {error, term()}.
+    {ok, queue_state()} | {error, term()}.
 
 %% any async events returned from the queue system should be processed through
 %% this

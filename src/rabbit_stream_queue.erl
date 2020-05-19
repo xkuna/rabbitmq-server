@@ -52,11 +52,10 @@
                  max :: non_neg_integer(),
                  start_offset = 0 :: non_neg_integer(),
                  listening_offset = 0 :: non_neg_integer(),
-                 log :: undefined | ra_log_reader:state()}).
+                 log :: undefined | orisis_log:state()}).
 
 -record(stream_client, {name :: term(),
-                        %% TODO why it's initialised to a `ra` thing?
-                        leader = ra:server_id(),
+                        leader :: pid(),
                         next_seq = 1 :: non_neg_integer(),
                         correlation = #{} :: #{appender_seq() => term()},
                         soft_limit :: non_neg_integer(),
@@ -66,6 +65,8 @@
 
 -import(rabbit_queue_type_util, [args_policy_lookup/3,
                                  qname_to_internal_name/1]).
+
+-type client() :: #stream_client{}.
 
 -spec is_enabled() -> boolean().
 is_enabled() ->
@@ -84,7 +85,8 @@ declare(Q0, Node) when ?amqqueue_is_stream(Q0) ->
     Opts = amqqueue:get_options(Q0),
     ActingUser = maps:get(user, Opts, ?UNKNOWN_USER),
     Conf0 = make_stream_conf(Node, Q0),
-    case rabbit_stream_coordinator:start_cluster(amqqueue:set_type_state(Q0, Conf0)) of
+    case rabbit_stream_coordinator:start_cluster(
+           amqqueue:set_type_state(Q0, Conf0)) of
         {error, already_started} ->
             rabbit_misc:protocol_error(precondition_failed,
                                        "safe queue name already in use '~s'",
@@ -140,7 +142,6 @@ consume(Q, #{no_ack := true}, _)
       "automatic acknowledgement not supported by stream queues ~s",
       [rabbit_misc:rs(amqqueue:get_name(Q))]);
 consume(Q, Spec, QState0) when ?amqqueue_is_stream(Q) ->
-    %% Provide support in osiris for reading from a replica
     %% Messages should include the offset as a custom header.
     check_queue_exists_in_local_node(Q),
     #{no_ack := NoAck,
@@ -165,8 +166,8 @@ consume(Q, Spec, QState0) when ?amqqueue_is_stream(Q) ->
     %% really it should be sent by the stream queue process like classic queues
     %% do
     maybe_send_reply(ChPid, OkMsg),
-    LocalPid = get_local_pid(amqqueue:get_type_state(Q)),
-    QState = begin_stream(QState0, LocalPid, ConsumerTag, Offset, ConsumerPrefetchCount),
+    QState = begin_stream(QState0, Q, ConsumerTag, Offset,
+                          ConsumerPrefetchCount),
     {ok, QState, []}.
 
 get_local_pid(#{leader_pid := Pid}) when node(Pid) == node() ->
@@ -178,7 +179,8 @@ get_local_pid(#{replica_pids := ReplicaPids}) ->
     Local.
 
 begin_stream(#stream_client{readers = Readers0} = State,
-             LocalPid, Tag, Offset, Max) ->
+             Q, Tag, Offset, Max) ->
+    LocalPid = get_local_pid(amqqueue:get_type_state(Q)),
     {ok, Seg0} = osiris:init_reader(LocalPid, Offset),
     NextOffset = osiris_log:next_offset(Seg0) - 1,
     osiris:register_offset_listener(LocalPid, NextOffset),
@@ -187,9 +189,10 @@ begin_stream(#stream_client{readers = Readers0} = State,
                       last -> NextOffset;
                       _ -> Offset
                   end,
-    Str0 = #stream{credit = Max,
+    Str0 = #stream{name = amqqueue:get_name(Q),
+                   credit = Max,
                    start_offset = StartOffset,
-                           listening_offset = NextOffset,
+                   listening_offset = NextOffset,
                    log = Seg0,
                    max = Max},
     State#stream_client{readers = Readers0#{Tag => Str0}}.
@@ -245,7 +248,7 @@ deliver(_Confirm, #delivery{message = Msg, msg_seq_no = MsgId},
     State#stream_client{next_seq = Seq + 1,
                         correlation = Correlation,
                         slow = Slow}.
-
+-spec dequeue(_, _, _, client()) -> no_return().
 dequeue(_, _, _, #stream_client{name = Name}) ->
     rabbit_misc:protocol_error(
       not_implemented,
@@ -295,12 +298,8 @@ is_recoverable(Q) ->
 recover(_VHost, Queues) ->
     lists:foldl(
       fun (Q0, {R0, F0}) ->
-              case recover(Q0) of
-                  {ok, Q} ->
-                      {[Q | R0], F0};
-                  {error, Q} ->
-                      {R0, [Q | F0]}
-              end
+              {ok, Q} = recover(Q0),
+              {[Q | R0], F0}
       end, {[], []}, Queues).
 
 settle(complete, CTag, MsgIds, #stream_client{readers = Readers0,
@@ -367,7 +366,8 @@ i(messages_unacknowledged, Q) when ?is_amqqueue(Q) ->
 i(committed_offset, Q) ->
     %% TODO should it be on a metrics table?
     Data = osiris_counters:overview(),
-    maps:get(committed_offset, maps:get({osiris_writer, amqqueue:get_name(Q)}, Data)).
+    maps:get(committed_offset,
+             maps:get({osiris_writer, amqqueue:get_name(Q)}, Data)).
 
 init(Q) when ?is_amqqueue(Q) ->
     Leader = amqqueue:get_pid(Q),

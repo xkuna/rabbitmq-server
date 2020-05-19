@@ -1573,7 +1573,8 @@ handle_method(#'basic.qos'{global         = true,
     {reply, #'basic.qos_ok'{}, State#ch{limiter = Limiter1}};
 
 handle_method(#'basic.recover_async'{requeue = true},
-              _, State = #ch{unacked_message_q = UAMQ, limiter = Limiter,
+              _, State = #ch{unacked_message_q = UAMQ,
+                             limiter = Limiter,
                              queue_states = QueueStates0}) ->
     OkFun = fun () -> ok end,
     UAMQL = ?QUEUE:to_list(UAMQ),
@@ -2079,7 +2080,6 @@ ack(Acked, State = #ch{queue_states = QueueStates0}) ->
     {QueueStates, Actions} =
         foreach_per_queue(
           fun ({QRef, CTag}, MsgIds, {Acc0, ActionsAcc0}) ->
-                  %% Acc = rabbit_amqqueue:ack(QPid, {CTag, MsgIds}, Acc0),
                   {ok, Acc, ActionsAcc} = rabbit_queue_type:settle(QRef, complete, CTag,
                                                                    MsgIds, Acc0),
                   incr_queue_stats(QRef, MsgIds, State),
@@ -2088,14 +2088,9 @@ ack(Acked, State = #ch{queue_states = QueueStates0}) ->
     ok = notify_limiter(State#ch.limiter, Acked),
     {State#ch{queue_states = QueueStates}, Actions}.
 
-incr_queue_stats(QRef, MsgIds, State) ->
-    case QRef of
-        undefined ->
-            ok;
-        QName ->
-            Count = length(MsgIds),
-            ?INCR_STATS(queue_stats, QName, Count, ack, State)
-    end.
+incr_queue_stats(QName, MsgIds, State) ->
+    Count = length(MsgIds),
+    ?INCR_STATS(queue_stats, QName, Count, ack, State).
 
 %% {Msgs, Acks}
 %%

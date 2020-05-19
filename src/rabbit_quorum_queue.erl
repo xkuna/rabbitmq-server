@@ -774,7 +774,7 @@ cleanup_data_dir() ->
              end
              || Q <- rabbit_amqqueue:list_by_type(?MODULE),
                 lists:member(node(), get_nodes(Q))],
-    NoQQClusters = rabbit_ra_registry:list_not_quorum_clusters(),
+    _NoQQClusters = rabbit_ra_registry:list_not_quorum_clusters(),
     Registered = ra_directory:list_registered(),
     Running = Names ++ Registered,
     _ = [maybe_delete_data_dir(UId) || {Name, UId} <- Registered,

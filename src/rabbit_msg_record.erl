@@ -12,8 +12,8 @@
 -include_lib("amqp10_common/include/amqp10_framing.hrl").
 
 -type maybe(T) :: T | undefined.
--type amqp10_data() :: [#'v1_0.data'{}] |
-                       [#'v1_0.amqp_sequence'{}] |
+-type amqp10_data() :: #'v1_0.data'{} |
+                       [#'v1_0.amqp_sequence'{} | #'v1_0.data'{}] |
                        #'v1_0.amqp_value'{}.
 -record(msg,
         {
@@ -31,7 +31,7 @@
 -record(?MODULE, {cfg :: #cfg{},
                   msg :: #msg{},
                   %% holds a list of modifications to various sections
-                  changes :: list()}).
+                  changes = [] :: list()}).
 
 -opaque state() :: #?MODULE{}.
 
@@ -56,7 +56,8 @@ init(Bin) when is_binary(Bin) ->
     % ] = amqp10_framing:decode_bin(Bin),
     {MA, P, AP, D} = decode(amqp10_framing:decode_bin(Bin),
                             {undefined, undefined, undefined, undefined}),
-    #?MODULE{msg = #msg{properties = P,
+    #?MODULE{cfg = #cfg{},
+             msg = #msg{properties = P,
                         application_properties = AP,
                         message_annotations = MA,
                         data = D}}.
@@ -164,7 +165,8 @@ from_amqp091(#'P_basic'{message_id = MsgId,
 
     AP = #'v1_0.application_properties'{content = APC},
     MA = #'v1_0.message_annotations'{content = MAC},
-    #?MODULE{msg = #msg{properties = P,
+    #?MODULE{cfg = #cfg{},
+             msg = #msg{properties = P,
                         application_properties = AP,
                         message_annotations = MA,
                         data = #'v1_0.data'{content = Data}}}.

@@ -1046,7 +1046,8 @@ list_local_mirrored_classic_without_synchronised_mirrors() ->
          is_replicated(Q),
          not has_synchronised_mirrors_online(Q)].
 
--spec list_local_mirrored_classic_without_synchronised_mirrors_for_cli() -> [amqqueue:amqqueue()].
+-spec list_local_mirrored_classic_without_synchronised_mirrors_for_cli() ->
+    [maps:map()].
 list_local_mirrored_classic_without_synchronised_mirrors_for_cli() ->
     ClassicQs = list_local_mirrored_classic_without_synchronised_mirrors(),
     [begin
@@ -1412,14 +1413,14 @@ delete(Q, IfUnused, IfEmpty, ActingUser) ->
 purge(Q) when ?is_amqqueue(Q) ->
     rabbit_queue_type:purge(Q).
 
--spec requeue(pid() | atom(),
+-spec requeue(name(),
               {rabbit_fifo:consumer_tag(), [msg_id()]},
               rabbit_queue_type:ctxs()) ->
     rabbit_queue_type:ctxs().
 requeue(QRef, {CTag, MsgIds}, QStates) ->
     reject(QRef, true, {CTag, MsgIds}, QStates).
 
--spec ack(pid(),
+-spec ack(name(),
           {rabbit_fifo:consumer_tag(), [msg_id()]},
           rabbit_queue_type:ctxs()) ->
     rabbit_queue_type:ctxs().
@@ -1427,7 +1428,7 @@ ack(QPid, {CTag, MsgIds}, QueueStates) ->
     rabbit_queue_type:settle(QPid, complete, CTag, MsgIds, QueueStates).
 
 
--spec reject(pid() | atom(),
+-spec reject(name(),
              boolean(),
              {rabbit_fifo:consumer_tag(), [msg_id()]},
              rabbit_queue_type:ctxs()) ->

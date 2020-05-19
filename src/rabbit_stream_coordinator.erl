@@ -436,7 +436,7 @@ make_ra_conf(Node, Nodes) ->
     #{cluster_name => ?MODULE,
       id => {?MODULE, Node},
       uid => UId,
-      friendly_name => ?MODULE,
+      friendly_name => atom_to_list(?MODULE),
       metrics_key => ?MODULE,
       initial_members => Members,
       log_init_args => #{uid => UId},

@@ -233,7 +233,7 @@ add_delivery_count_header(Msg, _Count) ->
 %% the sending rate.
 %%
 -spec settle(rabbit_fifo:consumer_tag(), [rabbit_fifo:msg_id()], state()) ->
-    state().
+    {state(), list()}.
 settle(ConsumerTag, [_|_] = MsgIds, #state{slow = false} = State0) ->
     Node = pick_node(State0),
     Cmd = rabbit_fifo:make_settle(consumer_id(ConsumerTag), MsgIds),
@@ -264,7 +264,7 @@ settle(ConsumerTag, [_|_] = MsgIds,
 %% the sending rate.
 %%
 -spec return(rabbit_fifo:consumer_tag(), [rabbit_fifo:msg_id()], state()) ->
-    state().
+    {state(), list()}.
 return(ConsumerTag, [_|_] = MsgIds, #state{slow = false} = State0) ->
     Node = pick_node(State0),
     % TODO: make rabbit_fifo return support lists of message ids
@@ -295,7 +295,7 @@ return(ConsumerTag, [_|_] = MsgIds,
 %% tag is `slow' it means the limit is approaching and it is time to slow down
 %% the sending rate.
 -spec discard(rabbit_fifo:consumer_tag(), [rabbit_fifo:msg_id()], state()) ->
-    state().
+    {state(), list()}.
 discard(ConsumerTag, [_|_] = MsgIds, #state{slow = false} = State0) ->
     Node = pick_node(State0),
     Cmd = rabbit_fifo:make_discard(consumer_id(ConsumerTag), MsgIds),
