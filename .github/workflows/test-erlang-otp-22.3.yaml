@@ -39,7 +39,6 @@ jobs:
         uses: actions/upload-artifact@v2
         with:
           name: rabbit-rabbitmq-deps.mk
-          path: rabbit-rabbitmq-deps.mk
       - name: CREATE DEPS ARCHIVE
         run: |
           tar cf - deps | xz > deps.tar.xz
@@ -47,7 +46,6 @@ jobs:
         uses: actions/upload-artifact@v2
         with:
           name: deps.tar.xz
-          path: deps.tar.xz
       - name: CHECK CROSS REFERENCES
         run: |
           make xref base_rmq_ref=master current_rmq_ref=${{ steps.ref.outputs.branch_or_tag_name }}
@@ -121,7 +119,6 @@ jobs:
         uses: actions/download-artifact@v2
         with:
           name: deps.tar.xz
-          path: deps.tar.xz
       - name: UNPACK DEPS ARCHIVE
         run: |
           tar Jxf deps.tar.xz
@@ -159,7 +156,6 @@ jobs:
         uses: actions/download-artifact@v2
         with:
           name: deps.tar.xz
-          path: deps.tar.xz
       - name: UNPACK DEPS ARCHIVE
         run: |
           tar Jxf deps.tar.xz
@@ -193,7 +189,6 @@ jobs:
         uses: actions/download-artifact@v2
         with:
           name: deps.tar.xz
-          path: deps.tar.xz
       - name: UNPACK DEPS ARCHIVE
         run: |
           tar Jxf deps.tar.xz
