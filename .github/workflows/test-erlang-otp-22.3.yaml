@@ -59,7 +59,7 @@ jobs:
         uses: actions/cache@v1
         with:
           path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.x-erlang-22.3-rev3
+          key: secondary-umbrellas-v3.7.x-v3.8.x-erlang-22.3-rev4
       - name: PREPARE SECONDARY UMBRELLA COPIES
         if: success() && 'latest' == 'oldest'
         run: |
@@ -91,7 +91,9 @@ jobs:
               make -C "$umbrella" clean-3rd-party-repos
               make -C "$umbrella" up
               make -C "$umbrella/deps/rabbit" test-dist
-              rm -fr "$umbrella"/deps/*/{.git,test} "$umbrella"/.git
+              rm -rf "$umbrella"/deps/rabbitmq_website
+              rm -rf "$umbrella"/deps/rabbitmq_prometheus/docker
+              rm -rf "$umbrella"/deps/*/{.git,test} "$umbrella"/.git
             fi
           done
           rm -fr umbrellas/master
