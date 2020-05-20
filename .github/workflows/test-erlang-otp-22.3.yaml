@@ -63,11 +63,6 @@ jobs:
       - name: PREPARE SECONDARY UMBRELLA COPIES
         if: success() && 'latest' == 'oldest'
         run: |
-          # ----------------------------------------------------------
-          # CAUTION:
-          # The same script must be copied to `03-CT_SUITE.yaml`. It is used to
-          # recreate the umbrellas if the cache restore fails.
-          # ----------------------------------------------------------
           set -x
           for version in v3.7.x v3.8.x; do
             umbrella="umbrellas/$version"
@@ -100,6 +95,14 @@ jobs:
             fi
           done
           rm -fr umbrellas/master
+      - name: CREATE SECONDARY UMBRELLAS ARCHIVE
+        run: |
+          tar cf - umbrellas | xz > secondary-umbrellas.tar.xz
+      - name: UPLOAD SECONDARY UMBRELLAS ARCHIVE
+        uses: actions/upload-artifact@v2
+        with:
+          name: secondary-umbrellas.tar.xz
+          path: secondary-umbrellas.tar.xz
   # vim:sw=2:et:
   dialyzer:
     name: dialyzer
@@ -124,12 +127,7 @@ jobs:
       - name: UNPACK DEPS ARCHIVE
         run: |
           tar Jxf deps.tar.xz
-      - name: CACHE DIALYZER PLT
-        if: success() && 'latest' == 'latest'
-        uses: actions/cache@v1
-        with:
-          path: .rabbit.plt
-          key: plt-rabbit-erlang-22.3-g${{ github.sha }}
+          rm deps.tar.xz
       - name: RUN DIALYZER
         if: success() && 'latest' == 'latest'
         run: |
@@ -161,6 +159,7 @@ jobs:
       - name: UNPACK DEPS ARCHIVE
         run: |
           tar Jxf deps.tar.xz
+          rm deps.tar.xz
       - name: RUN TESTS
         run: |
           ! test -d ebin || touch ebin/*
@@ -204,47 +203,14 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
-        if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.x-erlang-22.3-rev3
-      - name: VERIFY SECONDARY UMBRELLA COPIES (in case of cache restore failure)
-        if: success() && 'latest' == 'oldest'
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
         run: |
-          set -x
-          for version in v3.7.x v3.8.x; do
-            umbrella="umbrellas/$version"
-            if ! test -d "$umbrella"  ||
-               ! make -C "$umbrella/deps/rabbit" test-dist; then
-              rm -rf "$umbrella"
-
-              # Fetch the master Umbrella; the final umbrellas are created from
-              # the master copy.
-              if ! test -d umbrellas/master; then
-                git config --global advice.detachedHead false
-                git clone \
-                  https://github.com/rabbitmq/rabbitmq-public-umbrella.git \
-                  umbrellas/master
-                make -C umbrellas/master co # To get RabbitMQ components.
-              fi
-
-              # We copy the master Umbrella and checkout the appropriate tag.
-              cp -a umbrellas/master "$umbrella"
-              git -C "$umbrella" checkout "master"
-              make -C "$umbrella" up BRANCH="$version"
-              # To remove third-party deps which were checked out when the
-              # projects were on the `master` branch. Thus, possibly not the
-              # version pinning we expect. We update the Umbrella one last time
-              # to fetch the correct third-party deps.
-              make -C "$umbrella" clean-3rd-party-repos
-              make -C "$umbrella" up
-              make -C "$umbrella/deps/rabbit" test-dist
-              rm -fr "$umbrella"/deps/*/{.git,test} "$umbrella"/.git
-            fi
-          done
-          rm -fr umbrellas/master
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
