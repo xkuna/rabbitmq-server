@@ -258,10 +258,12 @@ jobs:
       - ct-config_schema
     runs-on: ubuntu-18.04
     steps:
-      - uses: actions/download-artifact@v2
+      - if: github.ref == 'refs/heads/master'
+        uses: actions/download-artifact@v2
         with:
           name: rabbit-rabbitmq-deps.mk
       - name: FORMAT GIT REF
+        if: github.ref == 'refs/heads/master'
         # https://github.community/t5/GitHub-Actions/How-can-I-set-an-expression-as-an-environment-variable-at/m-p/41804/highlight/true#M4751
         id: ref
         run: |
