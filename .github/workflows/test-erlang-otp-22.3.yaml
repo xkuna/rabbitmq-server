@@ -40,11 +40,14 @@ jobs:
         with:
           name: rabbit-rabbitmq-deps.mk
           path: rabbit-rabbitmq-deps.mk
-      - name: UPLOAD DEPS
+      - name: CREATE DEPS ARCHIVE
+        run: |
+          tar cf - deps | xz > deps.tar.xz
+      - name: UPLOAD DEPS ARCHIVE
         uses: actions/upload-artifact@v2
         with:
-          name: deps
-          path: deps
+          name: deps.tar.xz
+          path: deps.tar.xz
       - name: CHECK CROSS REFERENCES
         run: |
           make xref base_rmq_ref=master current_rmq_ref=${{ steps.ref.outputs.branch_or_tag_name }}
@@ -114,11 +117,14 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: DOWNLOAD DEPS
+      - name: DOWNLOAD DEPS ARCHIVE
         uses: actions/download-artifact@v2
         with:
-          name: deps
-          path: deps
+          name: deps.tar.xz
+          path: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: CACHE DIALYZER PLT
         if: success() && 'latest' == 'latest'
         uses: actions/cache@v1
@@ -149,11 +155,14 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: DOWNLOAD DEPS
+      - name: DOWNLOAD DEPS ARCHIVE
         uses: actions/download-artifact@v2
         with:
-          name: deps
-          path: deps
+          name: deps.tar.xz
+          path: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           ! test -d ebin || touch ebin/*
@@ -180,11 +189,14 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: DOWNLOAD DEPS
+      - name: DOWNLOAD DEPS ARCHIVE
         uses: actions/download-artifact@v2
         with:
-          name: deps
-          path: deps
+          name: deps.tar.xz
+          path: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
