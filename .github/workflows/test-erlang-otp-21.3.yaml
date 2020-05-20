@@ -124,10 +124,12 @@ jobs:
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
       - name: DOWNLOAD DEPS ARCHIVE
+        if: success() && 'oldest' == 'latest'
         uses: actions/download-artifact@v2
         with:
           name: deps.tar.xz
       - name: UNPACK DEPS ARCHIVE
+        if: success() && 'oldest' == 'latest'
         run: |
           tar Jxf deps.tar.xz
           rm deps.tar.xz
