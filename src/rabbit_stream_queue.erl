@@ -476,15 +476,7 @@ queue_name(#resource{virtual_host = VHost, name = Name}) ->
                                                      Timestamp/binary>>)).
 
 recover(Q) ->
-    #{replica_nodes := Nodes,
-      name := StreamId} = amqqueue:get_type_state(Q),
-    %% The leader is restarted by the coordinator, but replicas are not being monitored
-    case lists:member(node(), Nodes) of
-        true ->
-            rabbit_stream_coordinator:add_replica(StreamId, node());
-        false ->
-            ok
-    end,
+    rabbit_stream_coordinator:recover(),
     {ok, Q}.
 
 check_queue_exists_in_local_node(Q) ->

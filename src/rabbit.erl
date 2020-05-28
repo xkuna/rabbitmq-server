@@ -140,12 +140,12 @@
                     {requires,    pre_boot},
                     {enables,     external_infrastructure}]}).
 
--rabbit_boot_step({rabbit_stream_coordinator,
-                   [{description, "stream queues coordinator"},
-                    {mfa,         {rabbit_stream_coordinator, start,
-                                   []}},
-                    {requires,    pre_boot},
-                    {enables,     external_infrastructure}]}).
+%% -rabbit_boot_step({rabbit_stream_coordinator,
+%%                    [{description, "stream queues coordinator"},
+%%                     {mfa,         {rabbit_stream_coordinator, start,
+%%                                    []}},
+%%                     {requires,    pre_boot},
+%%                     {enables,     external_infrastructure}]}).
 
 -rabbit_boot_step({rabbit_event,
                    [{description, "statistics event manager"},
