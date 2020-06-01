@@ -170,7 +170,6 @@ apply(#{from := From}, {start_cluster, #{queue := Q}}, #?MODULE{streams = Stream
             {State, '$ra_no_reply', [{reply, From, {error, already_started}}]};
         false ->
             SState = #{state => start_cluster,
-                       phase => phase_start_cluster,
                        conf => Conf,
                        reply_to => From,
                        pending => []},
@@ -200,7 +199,7 @@ apply(#{from := From}, {start_replica, #{stream_id := StreamId, node := Node}} =
             {State, '$ra_no_reply', [{reply, From, {error, not_found}}]};
         #{conf := Conf,
           state := running} = SState0 ->
-            SState = update_stream_state(From, start_replica, phase_start_replica, SState0),
+            SState = update_stream_state(From, start_replica, SState0),
             {State#?MODULE{streams = Streams0#{StreamId => SState}}, '$ra_no_reply',
              [{aux, {phase, StreamId, phase_start_replica, [Node, Conf]}}]};
         SState0 ->
@@ -231,8 +230,7 @@ apply(#{from := From}, {delete_replica, #{stream_id := StreamId, node := Node}},
                     Replicas = lists:delete(Node, Replicas0),
                     Conf = Conf0#{replica_pids => ReplicaPids,
                                   replica_nodes => Replicas},
-                    SState = update_stream_state(From, delete_replica, phase_delete_replica,
-                                                 SState0#{conf => Conf0}),
+                    SState = update_stream_state(From, delete_replica, SState0#{conf => Conf0}),
                     {State#?MODULE{monitors = maps:remove(Pid, Monitors0),
                                    streams = Streams#{StreamId => SState}},
                      '$ra_no_reply',
@@ -253,7 +251,7 @@ apply(#{from := From}, {delete_cluster, #{stream_id := StreamId,
             Monitors = lists:foldl(fun(Pid, M) ->
                                            maps:remove(Pid, M)
                                    end, Monitors0, ReplicaPids ++ [LeaderPid]),
-            SState = update_stream_state(From, delete_cluster, phase_delete_cluster, SState0),
+            SState = update_stream_state(From, delete_cluster, SState0),
             Demonitors = [{demonitor, process, Pid} || Pid <- [LeaderPid | ReplicaPids]],
             {State#?MODULE{monitors = Monitors,
                            streams = Streams0#{StreamId => SState}}, '$ra_no_reply',
@@ -289,8 +287,7 @@ apply(_Meta, {down, Pid, _Reason} = Cmd, #?MODULE{streams = Streams,
                   pending := Pending0} = SState0 ->
                     case Role of
                         leader ->
-                            SState = update_stream_state(undefined, leader_election,
-                                                         phase_check_quorum, SState0),
+                            SState = update_stream_state(undefined, leader_election, SState0),
                             {State#?MODULE{monitors = Monitors,
                                            streams = Streams#{StreamId => SState}},
                              ok, [{aux, {phase, StreamId, phase_check_quorum, [Conf0]}}]};
@@ -298,7 +295,6 @@ apply(_Meta, {down, Pid, _Reason} = Cmd, #?MODULE{streams = Streams,
                             case rabbit_misc:is_process_alive(maps:get(leader_pid, Conf0)) of
                                 true ->
                                     SState = update_stream_state(undefined, replica_restart,
-                                                                 phase_start_replica,
                                                                  SState0),
                                     {State#?MODULE{monitors = Monitors,
                                                    streams = Streams#{StreamId => SState}},
@@ -324,23 +320,20 @@ apply(_Meta, {start_leader_election, StreamId, NewEpoch, Offsets},
     Conf = Conf0#{epoch => NewEpoch,
                   leader_node => NewLeader,
                   replica_nodes => lists:delete(NewLeader, Replicas ++ [Leader])},
-    SState = SState0#{conf => Conf,
-                      phase => phase_start_new_leader},
+    SState = SState0#{conf => Conf},
     {State#?MODULE{streams = Streams#{StreamId => SState}}, ok,
      [{aux, {phase, StreamId, phase_start_new_leader, [Conf]}}]};
 apply(_Meta, {restart_replicas, #{name := StreamId,
                                  leader_pid := LeaderPid} = Conf},
       #?MODULE{streams = Streams, monitors = Monitors} = State) ->
     SState0 = maps:get(StreamId, Streams),
-    SState = SState0#{conf => Conf,
-                      phase => phase_stop_replicas},
+    SState = SState0#{conf => Conf},
     {State#?MODULE{streams = Streams#{StreamId => SState},
                    monitors = maps:put(LeaderPid, {StreamId, leader}, Monitors)}, ok,
      [{monitor, process, LeaderPid}, {aux, {phase, StreamId, phase_stop_replicas, [Conf]}}]};
 apply(_Meta, {stream_updated, #{name := StreamId} = Conf}, #?MODULE{streams = Streams} = State) ->
     SState0 = maps:get(StreamId, Streams),
-    SState = SState0#{conf => Conf,
-                      phase => phase_repair_mnesia},
+    SState = SState0#{conf => Conf},
     {State#?MODULE{streams = Streams#{StreamId => SState}}, ok,
      [{aux, {phase, StreamId, phase_repair_mnesia, [update, Conf]}}]}.
 
@@ -365,12 +358,21 @@ handle_aux(leader, _, {down, Pid, normal}, Monitors, LogState, _) ->
     {no_reply, maps:remove(Pid, Monitors), LogState};
 handle_aux(leader, _, {down, Pid, Reason}, Monitors0, LogState, _) ->
     %% The phase has failed, let's retry it
-    {phase, StreamId, Fun, Args} = maps:get(Pid, Monitors0),
-    rabbit_log:warning("Error while executing coordinator phase ~p for stream queue ~p ~p",
-                       [Fun, StreamId, Reason]),
-    NewPid = erlang:apply(?MODULE, Fun, Args),
-    Monitors = maps:put(NewPid, StreamId, maps:remove(Pid, Monitors0)),
-    {no_reply, Monitors, LogState};
+    case maps:get(Pid, Monitors0) of
+        {phase, StreamId, phase_start_new_leader, Args} ->
+            rabbit_log:warning("Error while starting new leader for stream queue ~p, "
+                               "restarting election: ~p", [StreamId, Reason]),
+            NewPid = erlang:apply(?MODULE, phase_check_quorum, Args),
+            Monitors = maps:put(NewPid, {phase, StreamId, phase_check_quorum, Args},
+                                maps:remove(Pid, Monitors0)),
+            {no_reply, Monitors, LogState};
+        {phase, StreamId, Fun, Args} = Cmd ->
+            rabbit_log:warning("Error while executing coordinator phase ~p for stream queue ~p ~p",
+                               [Fun, StreamId, Reason]),
+            NewPid = erlang:apply(?MODULE, Fun, Args),
+            Monitors = maps:put(NewPid, Cmd, maps:remove(Pid, Monitors0)),
+            {no_reply, Monitors, LogState}
+    end;
 handle_aux(_, _, _, AuxState, LogState, _) ->
     {no_reply, AuxState, LogState}.
 
@@ -396,13 +398,11 @@ add_pending_cmd(From, {CmdName, CmdMap}, #{pending := Pending} = StreamState) ->
 
 clear_stream_state(StreamState) ->
     StreamState#{reply_to => undefined,
-                 state => running,
-                 phase => undefined}.
+                 state => running}.
 
-update_stream_state(From, State, Phase, StreamState) ->
+update_stream_state(From, State, StreamState) ->
     StreamState#{reply_to => From,
-                 state => State,
-                 phase => Phase}.
+                 state => State}.
 
 phase_start_replica(Node, #{replica_nodes := Replicas0,
                             replica_pids := ReplicaPids0,
