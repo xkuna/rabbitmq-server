@@ -25,6 +25,9 @@
          init_aux/1,
          handle_aux/6]).
 
+-export([subscribe/1,
+         unsubscribe/1]).
+
 -export([recover/0,
          start_cluster/1,
          delete_cluster/2,
@@ -87,6 +90,16 @@ find_members([Node | Nodes]) ->
             %% not sure what to do here
             find_members(Nodes)
     end.
+
+-spec subscribe(Name :: atom()) -> ok.
+subscribe(StreamId) ->
+    process_command({subscribe, #{stream_id => StreamId,
+                                  subscriber => self()}}).
+
+-spec unsubscribe(Name :: atom()) -> ok.
+unsubscribe(StreamId) ->
+    process_command({unsubscribe, #{stream_id => StreamId,
+                                    subscriber => self()}}).
 
 recover() ->
     ra:restart_server({?MODULE, node()}).
@@ -161,6 +174,39 @@ init(_Conf) ->
     #?MODULE{streams = #{},
              monitors = #{}}.
 
+apply(_Meta, {subscribe, #{stream_id := StreamId, subscriber := Subscriber}},
+      #?MODULE{streams = Streams} = State) ->
+    case maps:get(StreamId, Streams, undefined) of
+        undefined ->
+            {State, {error, not_found}, []};
+        #{conf := Conf,
+          subscribers := Subs} = SState0 ->
+            case lists:member(Subscriber, Subs) of
+                true ->
+                    {State, ok, []};
+                false ->
+                    SState = SState0#{subscribers  => [Subscriber | Subs]},
+                    {State#?MODULE{streams = Streams#{StreamId => SState}},
+                     ok, [leader_event(Conf, Subscriber)]}
+            end
+    end;
+apply(_Meta, {unsubscribe, #{stream_id := StreamId, event_type := leader_changes,
+                             subscriber := Subscriber}},
+      #?MODULE{streams = Streams} = State) ->
+    case maps:get(StreamId, Streams, undefined) of
+        undefined ->
+            {State, ok, []};
+        #{conf := Conf,
+          subscribers := Subs} = SState0 ->
+            case lists:member(Subscriber, Subs) of
+                false ->
+                    {State, ok, []};
+                true ->
+                    %% TODO send events on leader election and leader down
+                    SState = SState0#{subscribers  => lists:delete(Subscriber, Subs)},
+                    {State#?MODULE{streams = Streams#{StreamId => SState}}, ok, []}
+            end
+    end;
 apply(Meta, {_, #{from := From}} = Cmd, State) ->
     ?MODULE:apply(Meta#{from => From}, Cmd, State);
 apply(#{from := From}, {start_cluster, #{queue := Q}}, #?MODULE{streams = Streams} = State) ->
@@ -172,7 +218,8 @@ apply(#{from := From}, {start_cluster, #{queue := Q}}, #?MODULE{streams = Stream
             SState = #{state => start_cluster,
                        conf => Conf,
                        reply_to => From,
-                       pending => []},
+                       pending => [],
+                       subscribers => []},
             {State#?MODULE{streams = maps:put(StreamId, SState, Streams)}, '$ra_no_reply', 
              [{aux, {phase, StreamId, phase_start_cluster, [Q]}}]}
     end;
@@ -265,12 +312,18 @@ apply(_Meta, {delete_cluster_reply, StreamId},  #?MODULE{streams = Streams} = St
     State = State0#?MODULE{streams = maps:remove(StreamId, Streams)},
     case maps:get(StreamId, Streams) of
         #{reply_to := From,
-          pending := []} ->
-            {State, ok, [{reply, From, {ok, 0}}]};
+          pending := [],
+          subscribers := Subs,
+          conf := #{reference := Ref}} ->
+            Events = emit_queue_deleted_events(Ref, Subs),
+            {State, ok, [{reply, From, {ok, 0}}] ++ Events};
         #{reply_to := From,
-          pending := Pending} ->
+          pending := Pending,
+          subscribers := Subs,
+          conf := #{reference := Ref}} ->
+            Events = emit_queue_deleted_events(Ref, Subs),
             [ra:pipeline_command({?MODULE, node()}, Cmd) || Cmd <- Pending],
-            {State, ok, [{reply, From, {ok, 0}}]}
+            {State, ok, [{reply, From, {ok, 0}}] ++ Events}
     end;
 apply(_Meta, {down, Pid, _Reason} = Cmd, #?MODULE{streams = Streams,
                                                   monitors = Monitors0} = State) ->
@@ -283,14 +336,16 @@ apply(_Meta, {down, Pid, _Reason} = Cmd, #?MODULE{streams = Streams,
                 undefined ->
                     {State#?MODULE{monitors = Monitors}, ok, []};
                 #{state := running,
-                  conf := Conf0,
-                  pending := Pending0} = SState0 ->
+                  conf := #{reference := Ref} = Conf0,
+                  pending := Pending0,
+                  subscribers := Subs} = SState0 ->
                     case Role of
                         leader ->
                             SState = update_stream_state(undefined, leader_election, SState0),
+                            Events = emit_leader_down_events(Ref, Pid, Subs),
                             {State#?MODULE{monitors = Monitors,
                                            streams = Streams#{StreamId => SState}},
-                             ok, [{aux, {phase, StreamId, phase_check_quorum, [Conf0]}}]};
+                             ok, Events ++ [{aux, {phase, StreamId, phase_check_quorum, [Conf0]}}]};
                         follower ->
                             case rabbit_misc:is_process_alive(maps:get(leader_pid, Conf0)) of
                                 true ->
@@ -324,13 +379,15 @@ apply(_Meta, {start_leader_election, StreamId, NewEpoch, Offsets},
     {State#?MODULE{streams = Streams#{StreamId => SState}}, ok,
      [{aux, {phase, StreamId, phase_start_new_leader, [Conf]}}]};
 apply(_Meta, {restart_replicas, #{name := StreamId,
-                                 leader_pid := LeaderPid} = Conf},
+                                  leader_pid := LeaderPid} = Conf},
       #?MODULE{streams = Streams, monitors = Monitors} = State) ->
-    SState0 = maps:get(StreamId, Streams),
+    #{subscribers := Subs} = SState0 = maps:get(StreamId, Streams),
     SState = SState0#{conf => Conf},
+    Events = emit_leader_up_events(maps:get(reference, Conf), LeaderPid, Subs),
     {State#?MODULE{streams = Streams#{StreamId => SState},
                    monitors = maps:put(LeaderPid, {StreamId, leader}, Monitors)}, ok,
-     [{monitor, process, LeaderPid}, {aux, {phase, StreamId, phase_stop_replicas, [Conf]}}]};
+     Events ++ [{monitor, process, LeaderPid},
+                {aux, {phase, StreamId, phase_stop_replicas, [Conf]}}]};
 apply(_Meta, {stream_updated, #{name := StreamId} = Conf}, #?MODULE{streams = Streams} = State) ->
     SState0 = maps:get(StreamId, Streams),
     SState = SState0#{conf => Conf},
@@ -604,3 +661,20 @@ make_ra_conf(Node, Nodes) ->
       tick_timeout => 5000,
       machine => {module, ?MODULE, #{}},
       ra_event_formatter => Formatter}.
+
+emit_queue_deleted_events(Ref, Subs) ->
+    [{send_msg, S, {queue_deleted, Ref}, ra_event} || S <- Subs].
+
+emit_leader_down_events(Ref, Pid, Subs) ->
+    [{send_msg, S, {leader_down, Ref, Pid}, ra_event} || S <- Subs].
+
+emit_leader_up_events(Ref, Pid, Subs) ->
+    [{send_msg, S, {leader_up, Ref, Pid}, ra_event} || S <- Subs].
+
+leader_event(#{reference := Ref, leader_pid := Pid}, Subscriber) ->
+    case rabbit_misc:is_process_alive(Pid) of
+        true ->
+            {send_msg, Subscriber, {leader_up, Ref, Pid}, ra_event};
+        false ->
+            {send_msg, Subscriber, {leader_down, Ref, Pid}, ra_event}
+    end.
