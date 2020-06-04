@@ -51,12 +51,6 @@
 -spec init(binary()) -> state().
 init(Bin) when is_binary(Bin) ->
     %% TODO: delay parsing until needed
-    % [
-    %  #'v1_0.message_annotations'{} = MA,
-    %  #'v1_0.properties'{} = P,
-    %  #'v1_0.application_properties'{} = AP,
-    %  #'v1_0.data'{} = Data
-    % ] = amqp10_framing:decode_bin(Bin),
     {MA, P, AP, D} = decode(amqp10_framing:decode_bin(Bin),
                             {undefined, undefined, undefined, undefined}),
     #?MODULE{cfg = #cfg{},
@@ -181,7 +175,7 @@ from_amqp091(#'P_basic'{message_id = MsgId,
                        }, Data) ->
     %% TODO: support parsing properties bin directly?
     P = #'v1_0.properties'{message_id = wrap(utf8, MsgId),
-                           user_id = wrap(utf8, UserId),
+                           user_id = wrap(binary, UserId),
                            to = undefined,
                            % subject = wrap(utf8, RKey),
                            reply_to = case ReplyTo of
@@ -250,12 +244,12 @@ to_amqp091(#?MODULE{msg = #msg{properties = P,
               _ -> []
           end,
 
-    {Type, AP1} = get_application_property(utf8(<<"x-basic-type">>), AP0),
-    {AppId, AP} = get_application_property(utf8(<<"x-basic-app-id">>), AP1),
+    {Type, AP1} = amqp10_map_get(utf8(<<"x-basic-type">>), AP0),
+    {AppId, AP} = amqp10_map_get(utf8(<<"x-basic-app-id">>), AP1),
 
-    {Priority, MA1} = get_application_property(symbol(<<"x-basic-priority">>), MA0),
-    {DelMode, MA2} = get_application_property(symbol(<<"x-basic-delivery-mode">>), MA1),
-    {Expiration, _MA} = get_application_property(symbol(<<"x-basic-expiration">>), MA2),
+    {Priority, MA1} = amqp10_map_get(symbol(<<"x-basic-priority">>), MA0),
+    {DelMode, MA2} = amqp10_map_get(symbol(<<"x-basic-delivery-mode">>), MA1),
+    {Expiration, _MA} = amqp10_map_get(symbol(<<"x-basic-expiration">>), MA2),
 
     Headers = [to_091(unwrap(K), V) || {K, V} <- AP],
 
@@ -285,7 +279,7 @@ to_amqp091(#?MODULE{msg = #msg{properties = P,
 
 %%% Internal
 
-get_application_property(K, AP0) ->
+amqp10_map_get(K, AP0) ->
     case lists:keytake(K, 1, AP0) of
         false ->
             {undefined, AP0};
