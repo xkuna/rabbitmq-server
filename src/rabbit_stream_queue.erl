@@ -163,7 +163,13 @@ consume(Q, Spec, QState0) when ?amqqueue_is_stream(Q) ->
     QName = amqqueue:get_name(Q),
     Offset = case rabbit_misc:table_lookup(Args, <<"x-stream-offset">>) of
                  undefined ->
+                     next;
+                 {_, <<"first">>} ->
+                     first;
+                 {_, <<"last">>} ->
                      last;
+                 {_, <<"next">>} ->
+                     next;
                  {_, V} ->
                      V
              end,
@@ -196,6 +202,7 @@ begin_stream(#stream_client{readers = Readers0} = State,
     %% TODO: avoid double calls to the same process
     StartOffset = case Offset of
                       last -> NextOffset;
+                      next -> NextOffset;
                       _ -> Offset
                   end,
     Str0 = #stream{name = amqqueue:get_name(Q),

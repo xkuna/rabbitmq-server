@@ -91,12 +91,12 @@ find_members([Node | Nodes]) ->
             find_members(Nodes)
     end.
 
--spec subscribe(Name :: atom()) -> ok.
+-spec subscribe(Name :: string()) -> {error, term()} | {ok, Reply :: term(), Leader :: ra:server_id()}.
 subscribe(StreamId) ->
     process_command({subscribe, #{stream_id => StreamId,
                                   subscriber => self()}}).
 
--spec unsubscribe(Name :: atom()) -> ok.
+-spec unsubscribe(Name :: string()) -> {error, term()} | {ok, Reply :: term(), Leader :: ra:server_id()}.
 unsubscribe(StreamId) ->
     process_command({unsubscribe, #{stream_id => StreamId,
                                     subscriber => self()}}).
@@ -196,8 +196,7 @@ apply(_Meta, {unsubscribe, #{stream_id := StreamId, event_type := leader_changes
     case maps:get(StreamId, Streams, undefined) of
         undefined ->
             {State, ok, []};
-        #{conf := _Conf,
-          subscribers := Subs} = SState0 ->
+        #{subscribers := Subs} = SState0 ->
             case lists:member(Subscriber, Subs) of
                 false ->
                     {State, ok, []};

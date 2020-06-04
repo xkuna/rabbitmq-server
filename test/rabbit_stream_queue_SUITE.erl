@@ -68,7 +68,9 @@ all_tests() ->
      consume_and_nack,
      consume_and_ack,
      consume_and_reject,
-     consume_from_tail,
+     consume_from_last,
+     consume_from_next,
+     consume_from_default,
      consume_credit,
      consume_credit_out_of_order_ack,
      consume_credit_multiple_ack,
@@ -682,7 +684,7 @@ consume_and_ack(Config) ->
             exit(timeout)
     end.
 
-consume_from_tail(Config) ->
+consume_from_last(Config) ->
     [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
 
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
@@ -708,11 +710,12 @@ consume_from_tail(Config) ->
     ?assert(CommittedOffset > 0),
    
     %% If the offset is not provided, we're subscribing to the tail of the stream
-    amqp_channel:subscribe(Ch1, #'basic.consume'{queue = Q,
-                                                 no_ack = false,
-                                                 consumer_tag = <<"ctag">>,
-                                                 arguments = []},
-                           self()),
+    amqp_channel:subscribe(
+      Ch1, #'basic.consume'{queue = Q,
+                            no_ack = false,
+                            consumer_tag = <<"ctag">>,
+                            arguments = [{<<"x-stream-offset">>, longstr, <<"last">>}]},
+      self()),
     receive
         #'basic.consume_ok'{consumer_tag = <<"ctag">>} ->
              ok
@@ -720,6 +723,56 @@ consume_from_tail(Config) ->
 
     %% And receive the messages from the last committed offset to the end of the stream
     receive_batch(Ch1, CommittedOffset, 99),
+
+    %% Publish a few more
+    [publish(Ch, Q, <<"msg2">>) || _ <- lists:seq(1, 100)],
+    amqp_channel:wait_for_confirms(Ch, 5000),
+
+    %% Yeah! we got them
+    receive_batch(Ch1, 100, 199).
+
+consume_from_next(Config) ->
+    consume_from_next(Config, [{<<"x-stream-offset">>, longstr, <<"next">>}]).
+
+consume_from_default(Config) ->
+    consume_from_next(Config, []).
+
+consume_from_next(Config, Args) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
+    amqp_channel:register_confirm_handler(Ch, self()),
+    [publish(Ch, Q, <<"msg1">>) || _ <- lists:seq(1, 100)],
+    amqp_channel:wait_for_confirms(Ch, 5000),
+
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
+    qos(Ch1, 10, false),
+
+    [Info] = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_amqqueue,
+                                           info_all, [<<"/">>, [committed_offset]]),
+
+    %% We'll receive data from the last committed offset, let's check that is not the
+    %% first offset
+    CommittedOffset = proplists:get_value(committed_offset, Info),
+    ?assert(CommittedOffset > 0),
+
+    %% If the offset is not provided, we're subscribing to the tail of the stream
+    amqp_channel:subscribe(
+      Ch1, #'basic.consume'{queue = Q,
+                            no_ack = false,
+                            consumer_tag = <<"ctag">>,
+                            arguments = Args},
+      self()),
+    receive
+        #'basic.consume_ok'{consumer_tag = <<"ctag">>} ->
+             ok
+    end,
 
     %% Publish a few more
     [publish(Ch, Q, <<"msg2">>) || _ <- lists:seq(1, 100)],
