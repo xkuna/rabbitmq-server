@@ -124,7 +124,7 @@ add_message_annotations(Anns,
                                  #msg{message_annotations = MA0} = Msg} = State) ->
     Content = maps:fold(
                 fun (K, {T, V}, Acc) ->
-                        map_add(K, T, V, Acc)
+                        map_add(symbol, K, T, V, Acc)
                 end,
                 case MA0 of
                     undefined -> [];
@@ -153,7 +153,7 @@ message_annotation(Key,
                                  #'v1_0.message_annotations'{content = Content}}},
                   Default)
   when is_binary(Key) ->
-    case lists:search(fun ({{utf8, K}, _}) -> K == Key end, Content) of
+    case lists:search(fun ({{symbol, K}, _}) -> K == Key end, Content) of
         {value, {_K, V}} ->
             V;
         false ->
@@ -203,12 +203,12 @@ from_amqp091(#'P_basic'{message_id = MsgId,
                                                   end],
     %% properties that do not map directly to AMQP 1.0 properties are stored
     %% in application properties
-    APC = map_add(<<"x-basic-type">>, utf8, Type,
-                  map_add(<<"x-basic-app-id">>, utf8, AppId, APC0)),
+    APC = map_add(utf8, <<"x-basic-type">>, utf8, Type,
+                  map_add(utf8, <<"x-basic-app-id">>, utf8, AppId, APC0)),
 
-    MAC = map_add(<<"x-basic-priority">>, ubyte, Priority,
-                  map_add(<<"x-basic-delivery-mode">>, ubyte, DelMode,
-                          map_add(<<"x-basic-expiration">>, utf8, Expiration, []))),
+    MAC = map_add(symbol, <<"x-basic-priority">>, ubyte, Priority,
+                  map_add(symbol, <<"x-basic-delivery-mode">>, ubyte, DelMode,
+                          map_add(symbol, <<"x-basic-expiration">>, utf8, Expiration, []))),
 
     AP = #'v1_0.application_properties'{content = APC},
     MA = #'v1_0.message_annotations'{content = MAC},
@@ -218,10 +218,10 @@ from_amqp091(#'P_basic'{message_id = MsgId,
                         message_annotations = MA,
                         data = #'v1_0.data'{content = Data}}}.
 
-map_add(_Key, _Type, undefined, Acc) ->
+map_add(_T, _Key, _Type, undefined, Acc) ->
     Acc;
-map_add(Key, Type, Value, Acc) ->
-    [{wrap(utf8, Key), wrap(Type, Value)} | Acc].
+map_add(KeyType, Key, Type, Value, Acc) ->
+    [{wrap(KeyType, Key), wrap(Type, Value)} | Acc].
 
 -spec to_amqp091(state()) -> {#'P_basic'{}, iodata()}.
 to_amqp091(#?MODULE{msg = #msg{properties = P,
@@ -250,12 +250,12 @@ to_amqp091(#?MODULE{msg = #msg{properties = P,
               _ -> []
           end,
 
-    {Type, AP1} = get_application_property(<<"x-basic-type">>, AP0),
-    {AppId, AP} = get_application_property(<<"x-basic-app-id">>, AP1),
+    {Type, AP1} = get_application_property(utf8(<<"x-basic-type">>), AP0),
+    {AppId, AP} = get_application_property(utf8(<<"x-basic-app-id">>), AP1),
 
-    {Priority, MA1} = get_application_property(<<"x-basic-priority">>, MA0),
-    {DelMode, MA2} = get_application_property(<<"x-basic-delivery-mode">>, MA1),
-    {Expiration, _MA} = get_application_property(<<"x-basic-expiration">>, MA2),
+    {Priority, MA1} = get_application_property(symbol(<<"x-basic-priority">>), MA0),
+    {DelMode, MA2} = get_application_property(symbol(<<"x-basic-delivery-mode">>), MA1),
+    {Expiration, _MA} = get_application_property(symbol(<<"x-basic-expiration">>), MA2),
 
     Headers = [to_091(unwrap(K), V) || {K, V} <- AP],
 
@@ -286,7 +286,7 @@ to_amqp091(#?MODULE{msg = #msg{properties = P,
 %%% Internal
 
 get_application_property(K, AP0) ->
-    case lists:keytake(wrap(utf8, K), 1, AP0) of
+    case lists:keytake(K, 1, AP0) of
         false ->
             {undefined, AP0};
         {value, {_, V}, AP}  ->
@@ -363,6 +363,9 @@ from_091(timestamp, V) -> {timestamp, V}.
 % convert_header(unsignedshort, V) -> [$u, <<V:16/unsigned>>];
 % convert_header(unsignedint, V) -> [$i, <<V:32/unsigned>>];
 % convert_header(void, _V) -> [$V].
+
+utf8(T) -> {utf8, T}.
+symbol(T) -> {symbol, T}.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

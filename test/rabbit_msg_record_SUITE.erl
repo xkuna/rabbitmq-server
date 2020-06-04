@@ -53,9 +53,6 @@ end_per_testcase(_TestCase, _Config) ->
 %%%===================================================================
 
 ampq091_roundtrip(_Config) ->
-    % meck:expect(rabbit_mnesia, dir, fun () -> ?config(priv_dir, Config) end),
-    %% we need this process to generate the first guid for each process
-    % _GuidPid = rabbit_guid:start_link(),
     Props = #'P_basic'{content_type = <<"text/plain">>,
                        content_encoding = <<"gzip">>,
                        headers = [{<<"x-stream-offset">>, long, 99},
@@ -82,30 +79,9 @@ ampq091_roundtrip(_Config) ->
                        app_id = <<"rmq">>
                        % cluster_id = <<"adf">>
                       },
-    % Content = #content{class_id = 40, %% basic publish
-    %                    properties = Props,
-    %                    properties_bin = none,
-    %                    %% protocol = ???,
-    %                    payload_fragments_rev = },
-    % XName = #resource{kind = exchange,
-    %                   virtual_host = <<"vhost">>,
-    %                   name = <<"name">>},
     Payload = [<<"data">>],
     test_amqp091_roundtrip(Props, Payload),
     test_amqp091_roundtrip(#'P_basic'{}, Payload),
-    % {ok, BasicMsg} = rabbit_basic:message(XName, <<"routing-key">>, Content),
-    % AddMsgAnns = #{<<"x-routing-key">> => <<"routing-key">>,
-    %                <<"x-virtual-host">> => <<"vhost">>,
-    %                <<"x-exchange">> => <<"exchange">>},
-    % MsgRecord0 = rabbit_msg_record:from_amqp091(Props, Payload),
-    % MsgRecord = rabbit_msg_record:init(
-    %               iolist_to_binary(rabbit_msg_record:to_iodata(MsgRecord0))),
-    % % meck:unload(),
-    % {PropsOut, PayloadOut} = rabbit_msg_record:to_amqp091(MsgRecord),
-    % ?assertEqual(Props, PropsOut),
-    % ?assertEqual(iolist_to_binary(Payload),
-    %              iolist_to_binary(PayloadOut)),
-    %% basic message requires additional stuff
     ok.
 
 %% Utility
