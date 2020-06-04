@@ -196,7 +196,7 @@ apply(_Meta, {unsubscribe, #{stream_id := StreamId, event_type := leader_changes
     case maps:get(StreamId, Streams, undefined) of
         undefined ->
             {State, ok, []};
-        #{conf := Conf,
+        #{conf := _Conf,
           subscribers := Subs} = SState0 ->
             case lists:member(Subscriber, Subs) of
                 false ->

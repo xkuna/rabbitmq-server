@@ -4,7 +4,9 @@
          init/1,
          to_iodata/1,
          from_amqp091/2,
-         to_amqp091/1
+         to_amqp091/1,
+         add_message_annotations/2,
+         message_annotation/2
          ]).
 
 -include("rabbit.hrl").
@@ -112,6 +114,42 @@ to_iodata(#?MODULE{msg = #msg{properties = P,
      end,
      amqp10_framing:encode_bin(Data)
     ].
+
+%% TODO: refine type spec here
+-spec add_message_annotations(#{binary() => {atom(), term()}}, state()) ->
+    state().
+add_message_annotations(Anns,
+                        #?MODULE{msg =
+                                 #msg{message_annotations = MA0} = Msg} = State) ->
+    Content = maps:fold(
+                fun (K, {T, V}, Acc) ->
+                        map_add(K, T, V, Acc)
+                end,
+                case MA0 of
+                    undefined -> [];
+                    #'v1_0.message_annotations'{content = C} -> C
+                end,
+                Anns),
+
+    State#?MODULE{msg =
+                  Msg#msg{message_annotations =
+                            #'v1_0.message_annotations'{content = Content}}}.
+
+
+-spec message_annotation(binary(), state()) -> undefined | {atom(), term()}.
+message_annotation(_Key, #?MODULE{msg = #msg{message_annotations = undefined}}) ->
+    undefined;
+message_annotation(Key,
+                   #?MODULE{msg =
+                            #msg{message_annotations =
+                                 #'v1_0.message_annotations'{content = Content}}})
+  when is_binary(Key) ->
+    case lists:search(fun ({{utf8, K}, _}) -> K == Key end, Content) of
+        {value, {_K, V}} ->
+            V;
+        false ->
+            undefined
+    end.
 
 
 %% take a binary AMQP 1.0 input function,

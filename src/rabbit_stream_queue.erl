@@ -240,7 +240,7 @@ deliver(_Confirm, #delivery{message = Msg, msg_seq_no = MsgId},
                       correlation = Correlation0,
                       soft_limit = SftLmt,
                       slow = Slow0} = State) ->
-    ok = osiris:write(LeaderPid, Seq, term_to_binary(Msg)),
+    ok = osiris:write(LeaderPid, Seq, msg_to_iodata(Msg)),
     Correlation = case MsgId of
                       undefined ->
                           Correlation0;
@@ -525,7 +525,7 @@ stream_entries(Name, LeaderPid,
             end;
         {Records, Seg} ->
             Msgs = [begin
-                        Msg0 = binary_to_term(B),
+                        Msg0 = binary_to_msg(B),
                         Msg = rabbit_basic:add_header(<<"x-stream-offset">>,
                                                       long, O, Msg0),
                         {Name, LeaderPid, O, false, Msg}
@@ -548,3 +548,35 @@ stream_entries(Name, LeaderPid,
     end;
 stream_entries(_Name, _Id, Str, Msgs) ->
     {Str, Msgs}.
+
+binary_to_msg(Data) ->
+    R0 = rabbit_msg_record:init(Data),
+    {utf8, Exchange} = rabbit_msg_record:message_annotation(<<"x-exchange">>, R0),
+    {utf8, VHost} = rabbit_msg_record:message_annotation(<<"x-vhost">>, R0),
+    {utf8, RoutingKey} = rabbit_msg_record:message_annotation(<<"x-routing-key">>, R0),
+    {Props, Payload} = rabbit_msg_record:to_amqp091(R0),
+    XName = #resource{kind = exchange,
+                      virtual_host = VHost,
+                      name = Exchange},
+    Content = #content{class_id = 60,
+                       properties = Props,
+                       properties_bin = none,
+                       payload_fragments_rev = [Payload]},
+    {ok, Msg} = rabbit_basic:message(XName, RoutingKey, Content),
+    Msg.
+
+
+msg_to_iodata(#basic_message{exchange_name = #resource{name = Exchange,
+                                                       virtual_host = VHost},
+                             routing_keys = [RKey | _],
+                             content = Content}) ->
+    #content{properties = Props,
+             payload_fragments_rev = Payload} =
+        rabbit_binary_parser:ensure_content_decoded(Content),
+    R0 = rabbit_msg_record:from_amqp091(Props, lists:reverse(Payload)),
+    %% TODO durable?
+    R = rabbit_msg_record:add_message_annotations(
+          #{<<"x-exchange">> => {utf8, Exchange},
+            <<"x-vhost">> => {utf8, VHost},
+            <<"x-routing-key">> => {utf8, RKey}}, R0),
+    rabbit_msg_record:to_iodata(R).
