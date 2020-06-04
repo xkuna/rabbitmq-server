@@ -514,7 +514,8 @@ stream_entries(Name, Id, Str) ->
     stream_entries(Name, Id, Str, []).
 
 stream_entries(Name, LeaderPid,
-               #stream{credit = Credit,
+               #stream{name = QName,
+                       credit = Credit,
                        start_offset = StartOffs,
                        listening_offset = LOffs,
                        log = Seg0} = Str0, MsgIn)
@@ -532,7 +533,7 @@ stream_entries(Name, LeaderPid,
             end;
         {Records, Seg} ->
             Msgs = [begin
-                        Msg0 = binary_to_msg(B),
+                        Msg0 = binary_to_msg(QName, B),
                         Msg = rabbit_basic:add_header(<<"x-stream-offset">>,
                                                       long, O, Msg0),
                         {Name, LeaderPid, O, false, Msg}
@@ -556,11 +557,17 @@ stream_entries(Name, LeaderPid,
 stream_entries(_Name, _Id, Str, Msgs) ->
     {Str, Msgs}.
 
-binary_to_msg(Data) ->
+binary_to_msg(#resource{virtual_host = VHost,
+                        kind = queue,
+                        name = QName}, Data) ->
     R0 = rabbit_msg_record:init(Data),
-    {utf8, Exchange} = rabbit_msg_record:message_annotation(<<"x-exchange">>, R0),
-    {utf8, VHost} = rabbit_msg_record:message_annotation(<<"x-vhost">>, R0),
-    {utf8, RoutingKey} = rabbit_msg_record:message_annotation(<<"x-routing-key">>, R0),
+    %% if the message annotation isn't present the data most likely came from
+    %% the rabbitmq-stream plugin so we'll choose defaults that simulate use
+    %% of the direct exchange
+    {utf8, Exchange} = rabbit_msg_record:message_annotation(<<"x-exchange">>,
+                                                            R0, {utf8, <<>>}),
+    {utf8, RoutingKey} = rabbit_msg_record:message_annotation(<<"x-routing-key">>,
+                                                              R0, {utf8, QName}),
     {Props, Payload} = rabbit_msg_record:to_amqp091(R0),
     XName = #resource{kind = exchange,
                       virtual_host = VHost,
@@ -573,8 +580,7 @@ binary_to_msg(Data) ->
     Msg.
 
 
-msg_to_iodata(#basic_message{exchange_name = #resource{name = Exchange,
-                                                       virtual_host = VHost},
+msg_to_iodata(#basic_message{exchange_name = #resource{name = Exchange},
                              routing_keys = [RKey | _],
                              content = Content}) ->
     #content{properties = Props,
@@ -584,6 +590,5 @@ msg_to_iodata(#basic_message{exchange_name = #resource{name = Exchange,
     %% TODO durable?
     R = rabbit_msg_record:add_message_annotations(
           #{<<"x-exchange">> => {utf8, Exchange},
-            <<"x-vhost">> => {utf8, VHost},
             <<"x-routing-key">> => {utf8, RKey}}, R0),
     rabbit_msg_record:to_iodata(R).

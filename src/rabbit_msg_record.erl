@@ -6,7 +6,8 @@
          from_amqp091/2,
          to_amqp091/1,
          add_message_annotations/2,
-         message_annotation/2
+         message_annotation/2,
+         message_annotation/3
          ]).
 
 -include("rabbit.hrl").
@@ -135,20 +136,28 @@ add_message_annotations(Anns,
                   Msg#msg{message_annotations =
                             #'v1_0.message_annotations'{content = Content}}}.
 
+%% TODO: refine
+-type amqp10_term() :: {atom(), term()}.
 
--spec message_annotation(binary(), state()) -> undefined | {atom(), term()}.
-message_annotation(_Key, #?MODULE{msg = #msg{message_annotations = undefined}}) ->
-    undefined;
+-spec message_annotation(binary(), state()) -> undefined | amqp10_term().
+message_annotation(Key, State) ->
+    message_annotation(Key, State, undefined).
+
+-spec message_annotation(binary(), state(), amqp10_term()) -> amqp10_term().
+message_annotation(_Key, #?MODULE{msg = #msg{message_annotations = undefined}},
+                  Default) ->
+    Default;
 message_annotation(Key,
                    #?MODULE{msg =
                             #msg{message_annotations =
-                                 #'v1_0.message_annotations'{content = Content}}})
+                                 #'v1_0.message_annotations'{content = Content}}},
+                  Default)
   when is_binary(Key) ->
     case lists:search(fun ({{utf8, K}, _}) -> K == Key end, Content) of
         {value, {_K, V}} ->
             V;
         false ->
-            undefined
+            Default
     end.
 
 
