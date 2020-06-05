@@ -174,6 +174,12 @@ from_amqp091(#'P_basic'{message_id = MsgId,
                         timestamp = Timestamp
                        }, Data) ->
     %% TODO: support parsing properties bin directly?
+    ConvertedTs = case Timestamp of
+                      undefined ->
+                          undefined;
+                      _ ->
+                          Timestamp * 1000
+                  end,
     P = #'v1_0.properties'{message_id = wrap(utf8, MsgId),
                            user_id = wrap(binary, UserId),
                            to = undefined,
@@ -188,7 +194,7 @@ from_amqp091(#'P_basic'{message_id = MsgId,
                            correlation_id = wrap(utf8, CorrId),
                            content_type = wrap(symbol, ContentType),
                            content_encoding = wrap(symbol, ContentEncoding),
-                           creation_time = wrap(timestamp, Timestamp)},
+                           creation_time = wrap(timestamp, ConvertedTs)},
 
     APC0 = [{wrap(utf8, K), from_091(T, V)} || {K, T, V}
                                                <- case Headers of
@@ -273,7 +279,12 @@ to_amqp091(#?MODULE{msg = #msg{properties = P,
                     correlation_id = unwrap(CorrId),
                     content_type = unwrap(ContentType),
                     content_encoding = unwrap(ContentEncoding),
-                    timestamp = unwrap(Timestamp)
+                    timestamp = case unwrap(Timestamp) of
+                                    undefined ->
+                                        undefined;
+                                    Ts ->
+                                        Ts  div 1000
+                                end
                    },
     {BP, Payload}.
 
