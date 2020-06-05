@@ -216,7 +216,7 @@ apply(#{from := From}, {start_cluster, #{queue := Q}}, #?MODULE{streams = Stream
     #{name := StreamId} = Conf = amqqueue:get_type_state(Q),
     case maps:is_key(StreamId, Streams) of
         true ->
-            {State, '$ra_no_reply', [{reply, From, {error, already_started}}]};
+            {State, '$ra_no_reply', [{reply, From, {wrap_reply, {error, already_started}}}]};
         false ->
             SState = #{state => start_cluster,
                        conf => Conf,
@@ -246,7 +246,7 @@ apply(#{from := From}, {start_replica, #{stream_id := StreamId, node := Node}} =
       #?MODULE{streams = Streams0} = State) ->
     case maps:get(StreamId, Streams0, undefined) of
         undefined ->
-            {State, '$ra_no_reply', [{reply, From, {error, not_found}}]};
+            {State, '$ra_no_reply', [{reply, From, {wrap_reply, {error, not_found}}}]};
         #{conf := Conf,
           state := running} = SState0 ->
             SState = update_stream_state(From, start_replica, SState0),
@@ -267,13 +267,13 @@ apply(#{from := From}, {delete_replica, #{stream_id := StreamId, node := Node}},
                monitors = Monitors0} = State) ->
     case maps:get(StreamId, Streams, undefined) of
         undefined ->
-            {State, '$ra_no_reply', [{reply, From, {error, not_found}}]};
+            {State, '$ra_no_reply', [{reply, From, {wrap_reply, {error, not_found}}}]};
         #{conf := Conf0} = SState0 ->
             Replicas0 = maps:get(replica_nodes, Conf0),
             ReplicaPids0 = maps:get(replica_pids, Conf0),
             case lists:member(Node, Replicas0) of
                 false ->
-                    {State, '$ra_no_reply', [{reply, From, ok}]};
+                    {State, '$ra_no_reply', [{reply, From, {wrap_reply, ok}}]};
                 true ->
                     [Pid] = lists:filter(fun(P) -> node(P) == Node end, ReplicaPids0),
                     ReplicaPids = lists:delete(Pid, ReplicaPids0),
@@ -293,7 +293,7 @@ apply(#{from := From}, {delete_cluster, #{stream_id := StreamId,
       #?MODULE{streams = Streams0, monitors = Monitors0} = State) ->
     case maps:get(StreamId, Streams0, undefined) of
         undefined ->
-            {State, '$ra_no_reply', [{reply, From, {ok, 0}}]};
+            {State, '$ra_no_reply', [{reply, From, {wrap_reply, {ok, 0}}}]};
         #{conf := Conf,
           state := running} = SState0 ->
             ReplicaPids = maps:get(replica_pids, Conf),
@@ -319,14 +319,14 @@ apply(_Meta, {delete_cluster_reply, StreamId},  #?MODULE{streams = Streams} = St
           subscribers := Subs,
           conf := #{reference := Ref}} ->
             Events = emit_queue_deleted_events(Ref, Subs),
-            {State, ok, [{reply, From, {ok, 0}}] ++ Events};
+            {State, ok, [{reply, From, {wrap_reply, {ok, 0}}}] ++ Events};
         #{reply_to := From,
           pending := Pending,
           subscribers := Subs,
           conf := #{reference := Ref}} ->
             Events = emit_queue_deleted_events(Ref, Subs),
             [ra:pipeline_command({?MODULE, node()}, Cmd) || Cmd <- Pending],
-            {State, ok, [{reply, From, {ok, 0}}] ++ Events}
+            {State, ok, [{reply, From, {wrap_reply, {ok, 0}}}] ++ Events}
     end;
 apply(_Meta, {down, Pid, _Reason} = Cmd, #?MODULE{streams = Streams,
                                                   monitors = Monitors0} = State) ->
@@ -406,7 +406,7 @@ state_enter(leader, #?MODULE{streams = Streams}) ->
 state_enter(_, _) ->
     [].
 
-tick(_Ts, State) ->
+tick(_Ts, _State) ->
     [{aux, maybe_resize_coordinator_cluster}].
 
 maybe_resize_coordinator_cluster() ->
@@ -430,14 +430,14 @@ maybe_resize_coordinator_cluster() ->
                               Old ->
                                   rabbit_log:warning("Rabbit node(s) removed from the cluster, "
                                                      "deleting stream coordinator in: ~p", [Old]),
-                                  [ra:remove_member(Members, {?MODULE, Node}) || Node <- Old]
+                                  remove_members(Members, Old)
                           end;
                       _ ->
                           ok
                   end
           end).
 
-add_members(Members, []) ->
+add_members(_, []) ->
     ok;
 add_members(Members, [Node | Nodes]) ->
     Conf = make_ra_conf(Node, [N || {_, N} <- Members]),
@@ -454,13 +454,13 @@ add_members(Members, [Node | Nodes]) ->
             add_members(Members, Nodes)
     end.
 
-remove_members(Members, []) ->
+remove_members(_, []) ->
     ok;
 remove_members(Members, [Node | Nodes]) ->
     case ra:remove_member(Members, {?MODULE, Node}) of
         {ok, NewMembers, _} ->
             remove_members(NewMembers, Nodes);
-        Other ->
+        _ ->
             remove_members(Members, Nodes)
     end.
 
@@ -516,7 +516,7 @@ reply_and_run_pending(StreamId, Reply, #?MODULE{streams = Streams} = State) ->
     SState = maps:put(pending, Pending, clear_stream_state(SState0)),
     ReplyActions = case From of
                        undefined -> [];
-                       _ -> [{reply, From, Reply}]
+                       _ -> [{reply, From, {wrap_reply, Reply}}]
                    end,
     {State#?MODULE{streams = Streams#{StreamId => SState}}, ok, ReplyActions}.
 

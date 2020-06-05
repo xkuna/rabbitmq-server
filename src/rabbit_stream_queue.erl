@@ -90,11 +90,11 @@ declare(Q0, Node) when ?amqqueue_is_stream(Q0) ->
     Conf0 = make_stream_conf(Node, Q0),
     case rabbit_stream_coordinator:start_cluster(
            amqqueue:set_type_state(Q0, Conf0)) of
-        {error, already_started} ->
+        {ok, {error, already_started}, _} ->
             rabbit_misc:protocol_error(precondition_failed,
                                        "safe queue name already in use '~s'",
                                        [Node]);
-        {created, Q} ->
+        {ok, {created, Q}, _} ->
             rabbit_event:notify(queue_created,
                                 [{name, QName},
                                  {durable, true},
@@ -103,13 +103,13 @@ declare(Q0, Node) when ?amqqueue_is_stream(Q0) ->
                                  {user_who_performed_action,
                                   ActingUser}]),
             {new, Q};
-        {error, Error} ->
+        {ok, {error, Error}, _} ->
             _ = rabbit_amqqueue:internal_delete(QName, ActingUser),
             rabbit_misc:protocol_error(
               internal_error,
               "Cannot declare a queue '~s' on node '~s': ~255p",
               [rabbit_misc:rs(QName), node(), Error]);
-        {existing, _} = Ex ->
+        {ok, {existing, _}, _} = Ex ->
             Ex
     end.
 
@@ -119,7 +119,8 @@ declare(Q0, Node) when ?amqqueue_is_stream(Q0) ->
     rabbit_types:error(in_use | not_empty).
 delete(Q, _IfUnused, _IfEmpty, ActingUser) ->
     Name = maps:get(name, amqqueue:get_type_state(Q)),
-    rabbit_stream_coordinator:delete_cluster(Name, ActingUser).
+    {ok, Reply, _} = rabbit_stream_coordinator:delete_cluster(Name, ActingUser),
+    Reply.
 
 -spec purge(amqqueue:amqqueue()) ->
     {'ok', non_neg_integer()}.
@@ -134,10 +135,12 @@ stat(_) ->
     {ok, 0, 0}.
 
 subscribe(QName) ->
-    rabbit_stream_coordinator:subscribe(queue_name(QName)).
+    {ok, Reply, _} = rabbit_stream_coordinator:subscribe(queue_name(QName)),
+    Reply.
 
 unsubscribe(QName) ->
-    rabbit_stream_coordinator:unsubscribe(queue_name(QName)).
+    {ok, Reply, _} = rabbit_stream_coordinator:unsubscribe(queue_name(QName)),
+    Reply.
 
 consume(Q, #{prefetch_count := 0}, _)
   when ?amqqueue_is_stream(Q) ->
@@ -430,7 +433,8 @@ add_replica(VHost, Name, Node) ->
                     {error, node_not_running};
                 true ->
                     #{name := StreamId} = amqqueue:get_type_state(Q),
-                    rabbit_stream_coordinator:add_replica(StreamId, Node)
+                    {ok, Reply, _} = rabbit_stream_coordinator:add_replica(StreamId, Node),
+                    Reply
             end;
         E ->
             E
@@ -449,7 +453,8 @@ delete_replica(VHost, Name, Node) ->
                     {error, node_not_running};
                 true ->
                     #{name := StreamId} = amqqueue:get_type_state(Q),
-                    rabbit_stream_coordinator:delete_replica(StreamId, Node)
+                    {ok, Reply, _} = rabbit_stream_coordinator:delete_replica(StreamId, Node),
+                    Reply
             end;
         E ->
             E
