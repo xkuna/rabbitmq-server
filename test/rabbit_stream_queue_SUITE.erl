@@ -31,7 +31,9 @@ all() ->
      {group, cluster_size_2},
      {group, cluster_size_3},
      {group, unclustered_size_3_1},
-     {group, unclustered_size_3_2}
+     {group, unclustered_size_3_2},
+     {group, unclustered_size_3_3},
+     {group, cluster_size_3_1}
     ].
 
 groups() ->
@@ -46,7 +48,9 @@ groups() ->
            consume_from_replica,
            leader_failover]},
      {unclustered_size_3_1, [], [add_replica]},
-     {unclustered_size_3_2, [], [consume_without_local_replica]}
+     {unclustered_size_3_2, [], [consume_without_local_replica]},
+     {unclustered_size_3_3, [], [grow_coordinator_cluster]},
+     {cluster_size_3_1, [], [shrink_coordinator_cluster]}
     ].
 
 all_tests() ->
@@ -84,7 +88,9 @@ all_tests() ->
 
 init_per_suite(Config0) ->
     rabbit_ct_helpers:log_environment(),
-    rabbit_ct_helpers:run_setup_steps(Config0).
+    Config = rabbit_ct_helpers:merge_app_env(
+               Config0, {rabbit, [{stream_tick_interval, 1000}]}),
+    rabbit_ct_helpers:run_setup_steps(Config).
 
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
@@ -94,12 +100,15 @@ init_per_group(Group, Config) ->
                       single_node -> 1;
                       cluster_size_2 -> 2;
                       cluster_size_3 -> 3;
+                      cluster_size_3_1 -> 3;
                       unclustered_size_3_1 -> 3;
-                      unclustered_size_3_2 -> 3
+                      unclustered_size_3_2 -> 3;
+                      unclustered_size_3_3 -> 3
                   end,
     Clustered = case Group of
                     unclustered_size_3_1 -> false;
                     unclustered_size_3_2 -> false;
+                    unclustered_size_3_3 -> false;
                     _ -> true
                 end,
     Config1 = rabbit_ct_helpers:set_config(Config,
@@ -358,6 +367,53 @@ delete_replica(Config) ->
     ?assertEqual(ok, rpc:call(Server0, rabbit_stream_queue, delete_replica,
                               [<<"/">>, Q, Server2])),
     check_leader_and_replicas(Config, Q, Server0, []).
+
+grow_coordinator_cluster(Config) ->
+    [Server0, Server1, _Server2] =
+        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
+    Q = ?config(queue_name, Config),
+
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    ok = rabbit_control_helper:command(stop_app, Server1),
+    ok = rabbit_control_helper:command(join_cluster, Server1, [atom_to_list(Server0)], []),
+    rabbit_control_helper:command(start_app, Server1),
+
+    rabbit_ct_helpers:await_condition(
+      fun() ->
+              case rpc:call(Server0, ra, members, [{rabbit_stream_coordinator, Server0}]) of
+                  {_, Members, _} ->
+                      Nodes = lists:sort([N || {_, N} <- Members]),
+                      lists:sort([Server0, Server1]) == Nodes;
+                  _ ->
+                      false
+              end
+      end, 60000).
+
+shrink_coordinator_cluster(Config) ->
+    [Server0, Server1, Server2] =
+        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
+    Q = ?config(queue_name, Config),
+
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+
+    ok = rabbit_control_helper:command(stop_app, Server2),
+    ok = rabbit_control_helper:command(forget_cluster_node, Server0, [atom_to_list(Server2)], []),
+
+    rabbit_ct_helpers:await_condition(
+      fun() ->
+              case rpc:call(Server0, ra, members, [{rabbit_stream_coordinator, Server0}]) of
+                  {_, Members, _} ->
+                      Nodes = lists:sort([N || {_, N} <- Members]),
+                      lists:sort([Server0, Server1]) == Nodes;
+                  _ ->
+                      false
+              end
+      end, 60000).
 
 delete_classic_replica(Config) ->
     [Server0, Server1, _Server2] =

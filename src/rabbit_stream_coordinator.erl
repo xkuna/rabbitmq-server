@@ -23,7 +23,8 @@
          apply/3,
          state_enter/2,
          init_aux/1,
-         handle_aux/6]).
+         handle_aux/6,
+         tick/2]).
 
 -export([subscribe/1,
          unsubscribe/1]).
@@ -46,6 +47,7 @@
 -export([log_overview/1]).
 
 -define(STREAM_COORDINATOR_STARTUP, {stream_coordinator_startup, self()}).
+-define(TICK_TIMEOUT, 60000).
 
 -record(?MODULE, {streams, monitors}).
 
@@ -122,9 +124,11 @@ process_command(Cmd) ->
 
 process_command([], _Cmd) ->
     {error, coordinator_unavailable};
-process_command([Server | Servers], Cmd) ->
+process_command([Server | Servers], {CmdName, _} = Cmd) ->
     case ra:process_command(Server, Cmd) of
         {timeout, _} ->
+            rabbit_log:warning("Coordinator timeout on server ~p when processing command ~p",
+                               [Server, CmdName]),
             process_command(Servers, Cmd);
         {error, noproc} ->
             process_command(Servers, Cmd);
@@ -402,17 +406,84 @@ state_enter(leader, #?MODULE{streams = Streams}) ->
 state_enter(_, _) ->
     [].
 
+tick(_Ts, State) ->
+    [{aux, maybe_resize_coordinator_cluster}].
+
+maybe_resize_coordinator_cluster() ->
+    spawn(fun() ->
+                  case ra:members({?MODULE, node()}) of
+                      {_, Members, _} ->
+                          MemberNodes = [Node || {_, Node} <- Members],
+                          Running = rabbit_mnesia:cluster_nodes(running),
+                          All = rabbit_mnesia:cluster_nodes(all),
+                          case Running -- MemberNodes of
+                              [] ->
+                                  ok;
+                              New ->
+                                  rabbit_log:warning("New rabbit node(s) detected, "
+                                                     "adding stream coordinator in: ~p", [New]),
+                                  add_members(Members, New)
+                          end,
+                          case MemberNodes -- All of
+                              [] ->
+                                  ok;
+                              Old ->
+                                  rabbit_log:warning("Rabbit node(s) removed from the cluster, "
+                                                     "deleting stream coordinator in: ~p", [Old]),
+                                  [ra:remove_member(Members, {?MODULE, Node}) || Node <- Old]
+                          end;
+                      _ ->
+                          ok
+                  end
+          end).
+
+add_members(Members, []) ->
+    ok;
+add_members(Members, [Node | Nodes]) ->
+    Conf = make_ra_conf(Node, [N || {_, N} <- Members]),
+    case ra:start_server(Conf) of
+        ok ->
+            case ra:add_member(Members, {?MODULE, Node}) of
+                {ok, NewMembers, _} ->
+                    add_members(NewMembers, Nodes);
+                _ ->
+                    add_members(Members, Nodes)
+            end;
+        _ ->
+            %% TODO log failure?
+            add_members(Members, Nodes)
+    end.
+
+remove_members(Members, []) ->
+    ok;
+remove_members(Members, [Node | Nodes]) ->
+    case ra:remove_member(Members, {?MODULE, Node}) of
+        {ok, NewMembers, _} ->
+            remove_members(NewMembers, Nodes);
+        Other ->
+            remove_members(Members, Nodes)
+    end.
+
 init_aux(_Name) ->
-    #{}.
+    {#{}, undefined}.
 
 %% TODO ensure the dead writer is restarted as a replica at some point in time, increasing timeout?
-handle_aux(leader, _, {phase, _, Fun, Args} = Cmd, Monitors, LogState, _) ->
+handle_aux(leader, _, maybe_resize_coordinator_cluster, {Monitors, undefined}, LogState, _) ->
+    Pid = maybe_resize_coordinator_cluster(),
+    {no_reply, {Monitors, Pid}, LogState, [{monitor, process, aux, Pid}]};
+handle_aux(leader, _, maybe_resize_coordinator_cluster, AuxState, LogState, _) ->
+    %% Coordinator resizing is still happening, let's ignore this tick event
+    {no_reply, AuxState, LogState};
+handle_aux(leader, _, {down, Pid, _}, {Monitors, Pid}, LogState, _) ->
+    %% Coordinator resizing has finished
+    {no_reply, {Monitors, undefined}, LogState};
+handle_aux(leader, _, {phase, _, Fun, Args} = Cmd, {Monitors, Coordinator}, LogState, _) ->
     Pid = erlang:apply(?MODULE, Fun, Args),
     Actions = [{monitor, process, aux, Pid}],
-    {no_reply, maps:put(Pid, Cmd, Monitors), LogState, Actions};
-handle_aux(leader, _, {down, Pid, normal}, Monitors, LogState, _) ->
-    {no_reply, maps:remove(Pid, Monitors), LogState};
-handle_aux(leader, _, {down, Pid, Reason}, Monitors0, LogState, _) ->
+    {no_reply, {maps:put(Pid, Cmd, Monitors), Coordinator}, LogState, Actions};
+handle_aux(leader, _, {down, Pid, normal}, {Monitors, Coordinator}, LogState, _) ->
+    {no_reply, {maps:remove(Pid, Monitors), Coordinator}, LogState};
+handle_aux(leader, _, {down, Pid, Reason}, {Monitors0, Coordinator}, LogState, _) ->
     %% The phase has failed, let's retry it
     case maps:get(Pid, Monitors0) of
         {phase, StreamId, phase_start_new_leader, Args} ->
@@ -421,13 +492,13 @@ handle_aux(leader, _, {down, Pid, Reason}, Monitors0, LogState, _) ->
             NewPid = erlang:apply(?MODULE, phase_check_quorum, Args),
             Monitors = maps:put(NewPid, {phase, StreamId, phase_check_quorum, Args},
                                 maps:remove(Pid, Monitors0)),
-            {no_reply, Monitors, LogState};
+            {no_reply, {Monitors, Coordinator}, LogState};
         {phase, StreamId, Fun, Args} = Cmd ->
             rabbit_log:warning("Error while executing coordinator phase ~p for stream queue ~p ~p",
                                [Fun, StreamId, Reason]),
             NewPid = erlang:apply(?MODULE, Fun, Args),
             Monitors = maps:put(NewPid, Cmd, maps:remove(Pid, Monitors0)),
-            {no_reply, Monitors, LogState}
+            {no_reply, {Monitors, Coordinator}, LogState}
     end;
 handle_aux(_, _, _, AuxState, LogState, _) ->
     {no_reply, AuxState, LogState}.
@@ -650,6 +721,8 @@ make_ra_conf(Node, Nodes) ->
     UId = ra:new_uid(ra_lib:to_binary(?MODULE)),
     Formatter = {?MODULE, format_ra_event, []},
     Members = [{?MODULE, N} || N <- Nodes],
+    TickTimeout = application:get_env(rabbit, stream_tick_interval,
+                                      ?TICK_TIMEOUT),
     #{cluster_name => ?MODULE,
       id => {?MODULE, Node},
       uid => UId,
@@ -657,7 +730,7 @@ make_ra_conf(Node, Nodes) ->
       metrics_key => ?MODULE,
       initial_members => Members,
       log_init_args => #{uid => UId},
-      tick_timeout => 5000,
+      tick_timeout => TickTimeout,
       machine => {module, ?MODULE, #{}},
       ra_event_formatter => Formatter}.
 
