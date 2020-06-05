@@ -137,7 +137,8 @@ add_message_annotations(Anns,
 message_annotation(Key, State) ->
     message_annotation(Key, State, undefined).
 
--spec message_annotation(binary(), state(), amqp10_term()) -> amqp10_term().
+-spec message_annotation(binary(), state(), undefined | amqp10_term()) ->
+    undefined | amqp10_term().
 message_annotation(_Key, #?MODULE{msg = #msg{message_annotations = undefined}},
                   Default) ->
     Default;
@@ -257,9 +258,11 @@ to_amqp091(#?MODULE{msg = #msg{properties = P,
     {DelMode, MA2} = amqp10_map_get(symbol(<<"x-basic-delivery-mode">>), MA1),
     {Expiration, _MA} = amqp10_map_get(symbol(<<"x-basic-expiration">>), MA2),
 
-    Headers = [to_091(unwrap(K), V) || {K, V} <- AP],
+    Headers0 = [to_091(unwrap(K), V) || {K, V} <- AP],
+    {Headers1, MsgId091} = message_id(MsgId, <<"x-message-id-type">>, Headers0),
+    {Headers, CorrId091} = message_id(CorrId, <<"x-correlation-id-type">>, Headers1),
 
-    BP = #'P_basic'{message_id = unwrap(MsgId),
+    BP = #'P_basic'{message_id =  MsgId091,
                     delivery_mode = DelMode,
                     expiration = Expiration,
                     user_id = unwrap(UserId),
@@ -276,7 +279,7 @@ to_amqp091(#?MODULE{msg = #msg{properties = P,
                     type = Type,
                     app_id = AppId,
                     priority = Priority,
-                    correlation_id = unwrap(CorrId),
+                    correlation_id = CorrId091,
                     content_type = unwrap(ContentType),
                     content_encoding = unwrap(ContentEncoding),
                     timestamp = case unwrap(Timestamp) of
@@ -371,6 +374,33 @@ from_091(timestamp, V) -> {timestamp, V}.
 
 utf8(T) -> {utf8, T}.
 symbol(T) -> {symbol, T}.
+
+message_id({uuid, UUID}, HKey, H0) ->
+    H = [{HKey, longstr, <<"uuid">>} | H0],
+    {H, rabbit_guid:to_string(UUID)};
+message_id({ulong, N}, HKey, H0) ->
+    H = [{HKey, longstr, <<"ulong">>} | H0],
+    {H, erlang:integer_to_binary(N)};
+message_id({binary, B}, HKey, H0) ->
+    E = base64:encode(B),
+    case byte_size(E) > 256 of
+        true ->
+            K = binary:replace(HKey, <<"-type">>, <<>>),
+            {[{K, longstr, B} | H0], undefined};
+        false ->
+            H = [{HKey, longstr, <<"binary">>} | H0],
+            {H, E}
+    end;
+message_id({utf8, S}, HKey, H0) ->
+    case byte_size(S) > 256 of
+        true ->
+            K = binary:replace(HKey, <<"-type">>, <<>>),
+            {[{K, longstr, S} | H0], undefined};
+        false ->
+            {H0, S}
+    end;
+message_id(MsgId, _, H) ->
+    {H, unwrap(MsgId)}.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
