@@ -331,6 +331,7 @@ unwrap({_Type, V}) ->
 
 to_091(Key, {utf8, V}) when is_binary(V) -> {Key, longstr, V};
 to_091(Key, {long, V}) -> {Key, long, V};
+to_091(Key, {byte, V}) -> {Key, byte, V};
 to_091(Key, {ubyte, V}) -> {Key, unsignedbyte, V};
 to_091(Key, {short, V}) -> {Key, short, V};
 to_091(Key, {ushort, V}) -> {Key, unsignedshort, V};
@@ -341,7 +342,9 @@ to_091(Key, {float, V}) -> {Key, float, V};
 %% NB: header values can never be shortstr!
 to_091(Key, {timestamp, V}) -> {Key, timestamp, V div 1000};
 to_091(Key, {binary, V}) -> {Key, binary, V};
-to_091(Key, {boolean, V}) -> {Key, bool, V}.
+to_091(Key, {boolean, V}) -> {Key, bool, V};
+to_091(Key, true) -> {Key, bool, true};
+to_091(Key, false) -> {Key, bool, false}.
 
 from_091(longstr, V) when is_binary(V) -> {utf8, V};
 from_091(long, V) -> {long, V};
