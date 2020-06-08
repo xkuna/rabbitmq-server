@@ -1719,7 +1719,7 @@ handle_method(#'tx.commit'{}, _, State = #ch{tx      = {Msgs, Acks},
                         ({Requeue, A}, {Acc, Actions}) ->
                             {Acc0, Actions0} = internal_reject(Requeue, Rev(A), Limiter, Acc),
                             {Acc0, Actions ++ Actions0}
-                        end, State1, lists:reverse(Acks)),
+                    end, {State1, []}, lists:reverse(Acks)),
     State3 = handle_queue_actions(Actions2, State2),
     {noreply, maybe_complete_tx(State3#ch{tx = committing})};
 
