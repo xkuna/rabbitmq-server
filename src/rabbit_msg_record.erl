@@ -386,7 +386,7 @@ message_id({binary, B}, HKey, H0) ->
     case byte_size(E) > 256 of
         true ->
             K = binary:replace(HKey, <<"-type">>, <<>>),
-            {[{K, longstr, E} | H0], undefined};
+            {[{K, longstr, B} | H0], undefined};
         false ->
             H = [{HKey, longstr, <<"binary">>} | H0],
             {H, E}
