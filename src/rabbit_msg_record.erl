@@ -339,7 +339,7 @@ to_091(Key, {int, V}) -> {Key, signedint, V};
 to_091(Key, {double, V}) -> {Key, double, V};
 to_091(Key, {float, V}) -> {Key, float, V};
 %% NB: header values can never be shortstr!
-to_091(Key, {timestamp, V}) -> {Key, timestamp, V};
+to_091(Key, {timestamp, V}) -> {Key, timestamp, V div 1000};
 to_091(Key, {binary, V}) -> {Key, binary, V};
 to_091(Key, {boolean, V}) -> {Key, bool, V}.
 
@@ -354,7 +354,7 @@ from_091(double, V) -> {double, V};
 from_091(float, V) -> {float, V};
 from_091(bool, V) -> {boolean, V};
 from_091(binary, V) -> {binary, V};
-from_091(timestamp, V) -> {timestamp, V}.
+from_091(timestamp, V) -> {timestamp, V * 1000}.
 
 % convert_header(signedint, V) -> [$I, <<V:32/signed>>];
 % convert_header(decimal, V) -> {Before, After} = V,
