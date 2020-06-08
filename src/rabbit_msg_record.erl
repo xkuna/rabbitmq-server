@@ -273,7 +273,7 @@ to_amqp091(#?MODULE{msg = #msg{properties = P,
                     reply_to = case ReplyTo0 of
                                    undefined ->
                                        undefined;
-                                   {utf8, <<"/queue/", ReplyTo/binary>>} ->
+                                   {utf8, ReplyTo} ->
                                        ReplyTo
                                end,
                     type = Type,
@@ -377,7 +377,7 @@ symbol(T) -> {symbol, T}.
 
 message_id({uuid, UUID}, HKey, H0) ->
     H = [{HKey, longstr, <<"uuid">>} | H0],
-    {H, rabbit_guid:to_string(UUID)};
+    {H, rabbit_data_coercion:to_binary(rabbit_guid:to_string(UUID))};
 message_id({ulong, N}, HKey, H0) ->
     H = [{HKey, longstr, <<"ulong">>} | H0],
     {H, erlang:integer_to_binary(N)};
@@ -386,7 +386,7 @@ message_id({binary, B}, HKey, H0) ->
     case byte_size(E) > 256 of
         true ->
             K = binary:replace(HKey, <<"-type">>, <<>>),
-            {[{K, longstr, B} | H0], undefined};
+            {[{K, longstr, E} | H0], undefined};
         false ->
             H = [{HKey, longstr, <<"binary">>} | H0],
             {H, E}
