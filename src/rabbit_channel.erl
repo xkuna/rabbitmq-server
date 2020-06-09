@@ -197,6 +197,7 @@
          state,
          garbage_collection]).
 
+
 -define(CREATION_EVENT_KEYS,
         [pid,
          name,
@@ -742,12 +743,8 @@ handle_cast({reject_publish, MsgSeqNo, _QPid}, State = #ch{unconfirmed = UC}) ->
               record_rejects([MX], State#ch{unconfirmed = UC1}))
     end;
 
-% handle_cast({confirm, MsgSeqNos, QPid, _QName}, State) ->
-%     noreply_coalesce(confirm(MsgSeqNos, QPid, State));
 handle_cast({queue_event, QRef, Evt},
             #ch{queue_states = QueueStates0} = State0) ->
-    %% TODO: amend Ra event to follow same format and cast so we only need
-    %% one handler
     case rabbit_queue_type:handle_event(QRef, Evt, QueueStates0) of
         {ok, QState1, Actions} ->
             State1 = State0#ch{queue_states = QState1},
@@ -806,34 +803,6 @@ handle_info({'DOWN', _MRef, process, QPid, Reason},
             noreply_coalesce(
               State2#ch{queue_states = rabbit_queue_type:remove(QRef, QStates0)})
     end;
-    % State0 = State00#ch{queue_states = QStates1},
-    % State = handle_queue_actions(Actions, State0),
-    % noreply_coalesce(State);
-    % QStates = State#ch.queue_states,
-
-    %% need to remove classic queue type state before handling consuming
-    %% queue down as it may want to recover and thus create a new state
-    % QName = rabbit_queue_type:name(QPid, QStates),
-    % State = State0#ch{queue_monitors = pmon:erase(QPid, QMons),
-    %                   queue_states = rabbit_queue_type:remove(QPid, QStates)},
-    % State1 = handle_publishing_queue_down(QPid, QName, Reason, State),
-    % State3 = handle_consuming_queue_down_or_eol(QPid, QName, State1),
-    % State4 = handle_delivering_queue_down(QPid, State3),
-    % %% A rabbit_amqqueue_process has died. If our channel was being
-    % %% blocked by this process, and no other process is blocking our
-    % %% channel, then this channel will be unblocked. This means that
-    % %% any credit that was deferred will be sent to the rabbit_reader
-    % %% processs that might be blocked by this particular channel.
-    % credit_flow:peer_down(QPid),
-    % %% check if the queue state has be re-added and only delete queue stats
-    % %% if it has
-    % case rabbit_queue_type:name(QPid, State4#ch.queue_states) of
-    %     undefined ->
-    %         ok;
-    %     QN ->
-    %         erase_queue_stats(QN)
-    % end,
-    % noreply(State);
 
 handle_info({'EXIT', _Pid, Reason}, State) ->
     {stop, Reason, State};
@@ -850,12 +819,6 @@ handle_info(tick, State0 = #ch{queue_states = QueueStates0}) ->
       true  -> ok = clear_permission_cache();
       _     -> ok
     end,
-    %% TODO queue type expiry check should be inside queue type module
-    % QueueStates1 =
-    %     maps:filter(fun(QRef, _) ->
-    %                         QName = rabbit_queue_type:name(QRef, QueueStates0),
-    %                         [] /= rabbit_amqqueue:lookup([QName])
-    %                 end, QueueStates0),
     case evaluate_consumer_timeout(State0#ch{queue_states = QueueStates0}) of
         {noreply, State} ->
             noreply(init_tick_timer(reset_tick_timer(State)));

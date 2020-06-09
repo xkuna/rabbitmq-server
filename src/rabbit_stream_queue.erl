@@ -153,6 +153,9 @@ consume(Q, #{no_ack := true}, _)
       not_implemented,
       "automatic acknowledgement not supported by stream queues ~s",
       [rabbit_misc:rs(amqqueue:get_name(Q))]);
+consume(Q, #{limiter_active := true}, _State)
+  when ?amqqueue_is_stream(Q) ->
+    {error, global_qos_not_supported_for_queue_type};
 consume(Q, Spec, QState0) when ?amqqueue_is_stream(Q) ->
     %% Messages should include the offset as a custom header.
     check_queue_exists_in_local_node(Q),
