@@ -348,7 +348,7 @@ apply(_Meta, {down, Pid, _Reason} = Cmd, #?MODULE{streams = Streams,
                             Events = emit_leader_down_events(Ref, Pid, Subs),
                             {State#?MODULE{monitors = Monitors,
                                            streams = Streams#{StreamId => SState}},
-                             ok, Events ++ [{aux, {phase, StreamId, phase_check_quorum, [Conf0]}}]};
+                             ok, Events ++ [{aux, {phase, StreamId, phase_stop_replicas, [Conf0]}}]};
                         follower ->
                             case rabbit_misc:is_process_alive(maps:get(leader_pid, Conf0)) of
                                 true ->
@@ -381,7 +381,7 @@ apply(_Meta, {start_leader_election, StreamId, NewEpoch, Offsets},
     SState = SState0#{conf => Conf},
     {State#?MODULE{streams = Streams#{StreamId => SState}}, ok,
      [{aux, {phase, StreamId, phase_start_new_leader, [Conf]}}]};
-apply(_Meta, {restart_replicas, #{name := StreamId,
+apply(_Meta, {leader_elected, #{name := StreamId,
                                   leader_pid := LeaderPid} = Conf},
       #?MODULE{streams = Streams, monitors = Monitors} = State) ->
     #{subscribers := Subs} = SState0 = maps:get(StreamId, Streams),
@@ -390,7 +390,10 @@ apply(_Meta, {restart_replicas, #{name := StreamId,
     {State#?MODULE{streams = Streams#{StreamId => SState},
                    monitors = maps:put(LeaderPid, {StreamId, leader}, Monitors)}, ok,
      Events ++ [{monitor, process, LeaderPid},
-                {aux, {phase, StreamId, phase_stop_replicas, [Conf]}}]};
+                {aux, {phase, StreamId, phase_repair_mnesia, [update, Conf]}}]};
+apply(_Meta, {replicas_stopped, StreamId}, #?MODULE{streams = Streams} = State) ->
+    #{conf := Conf} = maps:get(StreamId, Streams),
+    {State, ok, [{aux, {phase, StreamId, phase_check_quorum, [Conf]}}]};
 apply(_Meta, {stream_updated, #{name := StreamId} = Conf}, #?MODULE{streams = Streams} = State) ->
     SState0 = maps:get(StreamId, Streams),
     SState = SState0#{conf => Conf},
@@ -574,7 +577,8 @@ phase_delete_replica(Node, Conf) ->
               ra:pipeline_command({?MODULE, node()}, {stream_updated, Conf})
       end).
 
-phase_stop_replicas(#{replica_nodes := Replicas} = Conf) ->
+phase_stop_replicas(#{replica_nodes := Replicas,
+                      name := StreamId} = Conf) ->
     spawn(
       fun() ->
               [try
@@ -583,7 +587,7 @@ phase_stop_replicas(#{replica_nodes := Replicas} = Conf) ->
                        %% It could be the old leader that is still down, it's normal.
                        ok
                end  || Node <- Replicas],
-              ra:pipeline_command({?MODULE, node()}, {stream_updated, Conf})
+              ra:pipeline_command({?MODULE, node()}, {replicas_stopped, StreamId})
       end).
 
 phase_start_new_leader(#{leader_node := Node} = Conf) ->
@@ -593,13 +597,13 @@ phase_start_new_leader(#{leader_node := Node} = Conf) ->
                   case osiris_writer:start(Conf) of
                       {ok, Pid} ->
                           ra:pipeline_command({?MODULE, node()},
-                                              {restart_replicas, maps:put(leader_pid, Pid, Conf)});
+                                              {leader_elected, maps:put(leader_pid, Pid, Conf)});
                       {error, already_present} ->
                           ra:pipeline_command({?MODULE, node()},
-                                              {restart_replicas, Conf});
+                                              {leader_elected, Conf});
                       {error, {already_started, Pid}} ->
                           ra:pipeline_command({?MODULE, node()},
-                                              {restart_replicas, maps:put(leader_pid, Pid, Conf)})
+                                              {leader_elected, maps:put(leader_pid, Pid, Conf)})
                   end
           end).
 
