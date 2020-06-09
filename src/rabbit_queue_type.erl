@@ -14,7 +14,6 @@
          purge/1,
          policy_changed/1,
          stat/1,
-         % link_name/3,
          remove/2,
          info/2,
          state_info/1,
@@ -25,6 +24,7 @@
          cancel/5,
          handle_down/3,
          handle_event/3,
+         module/2,
          deliver/3,
          settle/5,
          credit/5,
@@ -383,9 +383,6 @@ handle_down(Pid, Info, #?STATE{monitor_registry = Reg} = State0) ->
 -spec handle_event(queue_ref(), term(), state()) ->
     {ok, state(), actions()} | eol | {error, term()}.
 handle_event(QRef, Evt, Ctxs) ->
-    %% TODO: if the even is a down event we need to intercept it
-    %% and translate the pid or mref to the queue ref and dispatch
-    %%
     %% events can arrive after a queue state has been cleared up
     %% so need to be defensive here
     case get_ctx(QRef, Ctxs, undefined) of
@@ -401,6 +398,17 @@ handle_event(QRef, Evt, Ctxs) ->
             {ok, Ctxs, []}
     end.
 
+-spec module(queue_ref(), state()) ->
+    {ok, module()} | {error, not_found}.
+module(QRef, Ctxs) ->
+    %% events can arrive after a queue state has been cleared up
+    %% so need to be defensive here
+    case get_ctx(QRef, Ctxs, undefined) of
+        #ctx{module = Mod} ->
+            {ok, Mod};
+        undefined ->
+            {error, not_found}
+    end.
 
 -spec deliver([amqqueue:amqqueue()], Delivery :: term(),
               stateless | state()) ->

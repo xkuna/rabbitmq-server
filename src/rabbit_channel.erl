@@ -151,9 +151,6 @@
              consumer_mapping,
              %% a map of queue pids to consumer tag lists
              queue_consumers,
-             %% a set of pids of queues that have unacknowledged
-             %% deliveries
-             delivering_queues,
              %% timer used to emit statistics
              stats_timer,
              %% are publisher confirms enabled for this channel?
@@ -541,7 +538,6 @@ init([Channel, ReaderPid, WriterPid, ConnPid, ConnName, Protocol, User, VHost,
                 queue_monitors          = pmon:new(),
                 consumer_mapping        = #{},
                 queue_consumers         = #{},
-                delivering_queues       = sets:new(),
                 confirm_enabled         = false,
                 publish_seqno           = 1,
                 unconfirmed             = unconfirmed_messages:new(),
@@ -762,16 +758,15 @@ handle_cast({queue_event, QRef, Evt},
             noreply_coalesce(State);
         eol ->
             State1 = handle_consuming_queue_down_or_eol(QRef, QRef, State0),
-            State2 = handle_delivering_queue_down(QRef, State1),
             {ConfirmMXs, RejectMXs, UC1} =
-                unconfirmed_messages:forget_ref(QRef, State2#ch.unconfirmed),
+                unconfirmed_messages:forget_ref(QRef, State1#ch.unconfirmed),
             %% Deleted queue is a special case.
             %% Do not nack the "rejected" messages.
-            State3 = record_confirms(ConfirmMXs ++ RejectMXs,
-                                     State2#ch{unconfirmed = UC1}),
+            State2 = record_confirms(ConfirmMXs ++ RejectMXs,
+                                     State1#ch{unconfirmed = UC1}),
             erase_queue_stats(QRef),
             noreply_coalesce(
-              State3#ch{queue_states = rabbit_queue_type:remove(QRef, QueueStates0)})
+              State2#ch{queue_states = rabbit_queue_type:remove(QRef, QueueStates0)})
     end.
 
 handle_info({bump_credit, Msg}, State) ->
@@ -804,16 +799,15 @@ handle_info({'DOWN', _MRef, process, QPid, Reason},
             noreply_coalesce(State);
         {eol, QRef} ->
             State1 = handle_consuming_queue_down_or_eol(QRef, QRef, State0),
-            State2 = handle_delivering_queue_down(QRef, State1),
             {ConfirmMXs, RejectMXs, UC1} =
-                unconfirmed_messages:forget_ref(QRef, State2#ch.unconfirmed),
+                unconfirmed_messages:forget_ref(QRef, State1#ch.unconfirmed),
             %% Deleted queue is a special case.
             %% Do not nack the "rejected" messages.
-            State3 = record_confirms(ConfirmMXs ++ RejectMXs,
-                                     State2#ch{unconfirmed = UC1}),
+            State2 = record_confirms(ConfirmMXs ++ RejectMXs,
+                                     State1#ch{unconfirmed = UC1}),
             erase_queue_stats(QRef),
             noreply_coalesce(
-              State3#ch{queue_states = rabbit_queue_type:remove(QRef, QStates0)})
+              State2#ch{queue_states = rabbit_queue_type:remove(QRef, QStates0)})
     end;
     % State0 = State00#ch{queue_states = QStates1},
     % State = handle_queue_actions(Actions, State0),
@@ -1567,7 +1561,7 @@ handle_method(#'basic.qos'{global         = true,
     case ((not rabbit_limiter:is_active(Limiter)) andalso
           rabbit_limiter:is_active(Limiter1)) of
         true  -> rabbit_amqqueue:activate_limit_all(
-                   consumer_queue_refs(State#ch.consumer_mapping), self());
+                   classic_consumer_queue_pids(State#ch.consumer_mapping), self());
         false -> ok
     end,
     {reply, #'basic.qos_ok'{}, State#ch{limiter = Limiter1}};
@@ -1790,15 +1784,12 @@ basic_consume(QueueName, NoAck, ConsumerPrefetch, ActualConsumerTag,
                     Q}
            end) of
         {{ok, QueueStates, Actions}, Q} when ?is_amqqueue(Q) ->
-            QPid = amqqueue:get_pid(Q),
             CM1 = maps:put(
                     ActualConsumerTag,
                     {Q, {NoAck, ConsumerPrefetch, ExclusiveConsume, Args}},
                     ConsumerMapping),
-            State1 = track_delivering_queue(
-                       NoAck, QPid,
-                       State#ch{consumer_mapping = CM1,
-                                queue_states = QueueStates}),
+            State1 = State#ch{consumer_mapping = CM1,
+                              queue_states = QueueStates},
             State2 = handle_queue_actions(Actions, State1),
             {ok, case NoWait of
                      true  -> consumer_monitor(ActualConsumerTag, State2);
@@ -1825,45 +1816,6 @@ consumer_monitor(ConsumerTag,
     QCons1 = maps:put(QRef, CTags1, QCons),
     State#ch{queue_consumers = QCons1}.
 
-track_delivering_queue(NoAck, QPid,
-                       State = #ch{delivering_queues = DQ}) ->
-    QRef = qpid_to_ref(QPid),
-    State#ch{delivering_queues = case NoAck of
-                                     true  -> DQ;
-                                     false -> sets:add_element(QRef, DQ)
-                                 end}.
-
-% handle_publishing_queue_down(QPid, QName, Reason,
-%                              State = #ch{unconfirmed = UC})
-%   when ?IS_CLASSIC(QPid) ->
-%     case QName of
-%         %% The queue is unknown, the confirm must have been processed already
-%         undefined ->
-%             State;
-%         _QName ->
-%             case {rabbit_misc:is_abnormal_exit(Reason), Reason} of
-%                 {true, _} ->
-%                     {RejectMXs, UC1} =
-%                         unconfirmed_messages:reject_all_for_queue(QPid, UC),
-%                     record_rejects(RejectMXs, State#ch{unconfirmed = UC1});
-%                 {false, normal} ->
-%                     {ConfirmMXs, RejectMXs, UC1} =
-%                         unconfirmed_messages:forget_ref(QPid, UC),
-%                     %% Deleted queue is a special case.
-%                     %% Do not nack the "rejected" messages.
-%                     record_confirms(ConfirmMXs ++ RejectMXs,
-%                                     State#ch{unconfirmed = UC1});
-%                 {false, _} ->
-%                     {ConfirmMXs, RejectMXs, UC1} =
-%                         unconfirmed_messages:forget_ref(QPid, UC),
-%                     State1 = record_confirms(ConfirmMXs,
-%                                              State#ch{unconfirmed = UC1}),
-%                     record_rejects(RejectMXs, State1)
-%             end
-%     end;
-% handle_publishing_queue_down(QPid, _QName, _Reason, _State)
-%   when ?IS_QUORUM(QPid) ->
-%     error(quorum_queues_should_never_be_monitored).
 
 handle_consuming_queue_down_or_eol(QRef, QName,
                                    State = #ch{queue_consumers = QCons}) ->
@@ -1918,9 +1870,6 @@ queue_down_consumer_action(CTag, CMap) ->
         {bool, true} -> remove;
         _            -> {recover, ConsumeSpec}
     end.
-
-handle_delivering_queue_down(QRef, State = #ch{delivering_queues = DQ}) ->
-    State#ch{delivering_queues = sets:del_element(QRef, DQ)}.
 
 binding_action(Fun, SourceNameBin0, DestinationType, DestinationNameBin0,
                RoutingKey, Arguments, VHostPath, ConnPid, AuthzContext,
@@ -2109,12 +2058,8 @@ new_tx() -> {?QUEUE:new(), []}.
 notify_queues(State = #ch{cfg = #conf{state = closing}}) ->
     {ok, State};
 notify_queues(State = #ch{consumer_mapping  = Consumers,
-                          cfg = Cfg,
-                          delivering_queues = DQ}) ->
-    QRefs0 = sets:to_list(
-               sets:union(sets:from_list(consumer_queue_refs(Consumers)), DQ)),
-    %% filter to only include pids to avoid trying to notify quorum queues
-    QPids = [P || P <- QRefs0, ?IS_CLASSIC(P)],
+                          cfg = Cfg}) ->
+    QPids = classic_consumer_queue_pids(Consumers),
     Timeout = get_operation_timeout(),
     {rabbit_amqqueue:notify_down_all(QPids, self(), Timeout),
      State#ch{cfg = Cfg#conf{state = closing}}}.
@@ -2134,10 +2079,11 @@ foreach_per_queue(F, UAL, Acc) ->
                     end, gb_trees:empty(), UAL),
     rabbit_misc:gb_trees_fold(fun (Key, Val, Acc0) -> F(Key, Val, Acc0) end, Acc, T).
 
-consumer_queue_refs(Consumers) ->
-    lists:usort([qpid_to_ref(amqqueue:get_pid(Q))
-                 || {_Key, {Q, _CParams}} <- maps:to_list(Consumers),
-                    amqqueue:is_amqqueue(Q)]).
+%% hack to patch up missing queue type behaviour for classic queue
+classic_consumer_queue_pids(Consumers) ->
+    lists:usort([amqqueue:get_pid(Q)
+                 || {Q, _CParams} <- maps:values(Consumers),
+                    amqqueue:get_type(Q) == rabbit_classic_queue]).
 
 %% tell the limiter about the number of acks that have been received
 %% for messages delivered to subscribed consumers, but not acks for
@@ -2690,24 +2636,25 @@ handle_deliver(CTag, Ack, Msgs, State) ->
                 end, State, Msgs).
 
 handle_deliver0(ConsumerTag, AckRequired,
-               Msg = {_QName, QPid, _MsgId, Redelivered,
+                Msg = {QName, QPid, _MsgId, Redelivered,
                       #basic_message{exchange_name = ExchangeName,
                                      routing_keys  = [RoutingKey | _CcRoutes],
                                      content       = Content}},
                State = #ch{cfg = #conf{writer_pid = WriterPid,
                                        writer_gc_threshold = GCThreshold},
-                           next_tag   = DeliveryTag}) ->
+                           next_tag   = DeliveryTag,
+                           queue_states = Qs}) ->
     Deliver = #'basic.deliver'{consumer_tag = ConsumerTag,
                                delivery_tag = DeliveryTag,
                                redelivered  = Redelivered,
                                exchange     = ExchangeName#resource.name,
                                routing_key  = RoutingKey},
     % rabbit_log:info("handle delivery ~w", [Msg]),
-    case ?IS_CLASSIC(QPid) of
-        true ->
+    case rabbit_queue_type:module(QName, Qs) of
+        {ok, rabbit_classic_queue} ->
             ok = rabbit_writer:send_command_and_notify(
                    WriterPid, QPid, self(), Deliver, Content);
-        false ->
+        _ ->
             ok = rabbit_writer:send_command(WriterPid, Deliver, Content)
     end,
     case GCThreshold of
@@ -2717,7 +2664,7 @@ handle_deliver0(ConsumerTag, AckRequired,
     record_sent(deliver, ConsumerTag, AckRequired, Msg, State).
 
 handle_basic_get(WriterPid, DeliveryTag, NoAck, MessageCount,
-                 Msg = {_QName, QPid, _MsgId, Redelivered,
+                 Msg = {_QName, _QPid, _MsgId, Redelivered,
                         #basic_message{exchange_name = ExchangeName,
                                        routing_keys  = [RoutingKey | _CcRoutes],
                                        content       = Content}}, State) ->
@@ -2729,8 +2676,7 @@ handle_basic_get(WriterPid, DeliveryTag, NoAck, MessageCount,
                            routing_key   = RoutingKey,
                            message_count = MessageCount},
            Content),
-    State1 = track_delivering_queue(NoAck, QPid, State),
-    {noreply, record_sent(get, DeliveryTag, not(NoAck), Msg, State1)}.
+    {noreply, record_sent(get, DeliveryTag, not(NoAck), Msg, State)}.
 
 init_tick_timer(State = #ch{tick_timer = undefined}) ->
     {ok, Interval} = application:get_env(rabbit, channel_tick_interval),
@@ -2755,13 +2701,6 @@ maybe_cancel_tick_timer(#ch{tick_timer = TRef,
             %% let the timer continue
             State
     end.
-
-%% only classic queues need monitoring so rather than special casing
-%% everywhere monitors are set up we wrap it here for this module
-% maybe_monitor(QPid, QMons) when ?IS_CLASSIC(QPid) ->
-%     pmon:monitor(QPid, QMons);
-% maybe_monitor(_, QMons) ->
-%     QMons.
 
 qpid_to_ref(Pid) when is_pid(Pid) -> Pid;
 qpid_to_ref({Name, Node}) when is_atom(Name) andalso is_atom(Node) ->

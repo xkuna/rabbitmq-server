@@ -232,7 +232,7 @@ handle_event({reject_publish, SeqNo, _QPid},
 handle_event({down, Pid, Info}, #?STATE{qref = QRef,
                                         pid = MasterPid,
                                         unconfirmed = U0} = State0) ->
-    rabbit_log:info("classic: handle down ~w ~w ~w", [Pid, Info, QRef]),
+    rabbit_log:debug("classic: handle down ~w ~w ~w", [Pid, Info, QRef]),
     case rabbit_misc:is_abnormal_exit(Info) of
         false when Info =:= normal andalso Pid == MasterPid ->
             %% queue was deleted and masterpid is down
