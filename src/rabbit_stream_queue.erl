@@ -468,24 +468,39 @@ make_stream_conf(Node, Q) ->
     Name = queue_name(QName),
     %% MaxLength = args_policy_lookup(<<"max-length">>, fun min/2, Q),
     MaxBytes = args_policy_lookup(<<"max-length-bytes">>, fun min/2, Q),
-    %% MaxAge = args_policy_lookup(<<"max-age">>, fun max_age/2, Q),
+    MaxAge = max_age(args_policy_lookup(<<"max-age">>, fun max_age/2, Q)),
     MaxSegmentSize = args_policy_lookup(<<"max-segment-size">>, fun min/2, Q),
     Replicas = rabbit_mnesia:cluster_nodes(all) -- [Node],
     Formatter = {?MODULE, format_osiris_event, [QName]},
-    #{reference => QName,
-      name => Name,
-      retention => [{max_bytes, MaxBytes}],
-      max_segment_size => MaxSegmentSize,
-      leader_node => Node,
-      replica_nodes => Replicas,
-      event_formatter => Formatter,
-      epoch => 1}.
+    Retention = lists:filter(fun({_, R}) ->
+                                     R =/= undefined
+                             end, [{max_bytes, MaxBytes},
+                                   {max_age, MaxAge}]),
+    add_if_defined(max_segment_size, MaxSegmentSize, #{reference => QName,
+                                                       name => Name,
+                                                       retention => Retention,
+                                                       leader_node => Node,
+                                                       replica_nodes => Replicas,
+                                                       event_formatter => Formatter,
+                                                       epoch => 1}).
+
+add_if_defined(_, undefined, Map) ->
+    Map;
+add_if_defined(Key, Value, Map) ->
+    maps:put(Key, Value, Map).
 
 format_osiris_event(Evt, QRef) ->
     {'$gen_cast', {queue_event, QRef, Evt}}.
 
-%% max_age(Age1, Age2) ->
-%%     min(rabbit_amqqueue:check_max_age(Age1), rabbit_amqqueue:check_max_age(Age2)).
+max_age(undefined) ->
+    undefined;
+max_age(Bin) when is_binary(Bin) ->
+    rabbit_amqqueue:check_max_age(Bin);
+max_age(Age) ->
+    Age.
+
+max_age(Age1, Age2) ->
+    min(rabbit_amqqueue:check_max_age(Age1), rabbit_amqqueue:check_max_age(Age2)).
 
 check_invalid_arguments(QueueName, Args) ->
     Keys = [<<"x-expires">>, <<"x-message-ttl">>,
