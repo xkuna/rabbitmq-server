@@ -225,9 +225,6 @@
             put({Type, Key}, none)
         end).
 
--define(IS_CLASSIC(QPid), is_pid(QPid)).
--define(IS_QUORUM(QPid), is_tuple(QPid)).
-
 %%----------------------------------------------------------------------------
 
 -export_type([channel_number/0]).
