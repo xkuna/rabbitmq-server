@@ -109,8 +109,8 @@ declare(Q0, Node) when ?amqqueue_is_stream(Q0) ->
               internal_error,
               "Cannot declare a queue '~s' on node '~s': ~255p",
               [rabbit_misc:rs(QName), node(), Error]);
-        {ok, {existing, _}, _} = Ex ->
-            Ex
+        {ok, {existing, Q}, _} ->
+            {existing, Q}
     end.
 
 -spec delete(amqqueue:amqqueue(), boolean(),
