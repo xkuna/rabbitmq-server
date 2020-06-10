@@ -26,8 +26,8 @@
          handle_aux/6,
          tick/2]).
 
--export([subscribe/1,
-         unsubscribe/1]).
+-export([subscribe/2,
+         unsubscribe/2]).
 
 -export([recover/0,
          start_cluster/1,
@@ -93,15 +93,15 @@ find_members([Node | Nodes]) ->
             find_members(Nodes)
     end.
 
--spec subscribe(Name :: string()) -> {error, term()} | {ok, Reply :: term(), Leader :: ra:server_id()}.
-subscribe(StreamId) ->
+-spec subscribe(Name :: string(), pid()) -> {error, term()} | {ok, Reply :: term(), Leader :: ra:server_id()}.
+subscribe(StreamId, Pid) ->
     process_command({subscribe, #{stream_id => StreamId,
-                                  subscriber => self()}}).
+                                  subscriber => Pid}}).
 
--spec unsubscribe(Name :: string()) -> {error, term()} | {ok, Reply :: term(), Leader :: ra:server_id()}.
-unsubscribe(StreamId) ->
+-spec unsubscribe(Name :: string(), pid()) -> {error, term()} | {ok, Reply :: term(), Leader :: ra:server_id()}.
+unsubscribe(StreamId, Pid) ->
     process_command({unsubscribe, #{stream_id => StreamId,
-                                    subscriber => self()}}).
+                                    subscriber => Pid}}).
 
 recover() ->
     ra:restart_server({?MODULE, node()}).
@@ -194,8 +194,7 @@ apply(_Meta, {subscribe, #{stream_id := StreamId, subscriber := Subscriber}},
                      ok, [leader_event(Conf, Subscriber)]}
             end
     end;
-apply(_Meta, {unsubscribe, #{stream_id := StreamId, event_type := leader_changes,
-                             subscriber := Subscriber}},
+apply(_Meta, {unsubscribe, #{stream_id := StreamId, subscriber := Subscriber}},
       #?MODULE{streams = Streams} = State) ->
     case maps:get(StreamId, Streams, undefined) of
         undefined ->
@@ -205,7 +204,6 @@ apply(_Meta, {unsubscribe, #{stream_id := StreamId, event_type := leader_changes
                 false ->
                     {State, ok, []};
                 true ->
-                    %% TODO send events on leader election and leader down
                     SState = SState0#{subscribers  => lists:delete(Subscriber, Subs)},
                     {State#?MODULE{streams = Streams#{StreamId => SState}}, ok, []}
             end
@@ -739,18 +737,18 @@ make_ra_conf(Node, Nodes) ->
       ra_event_formatter => Formatter}.
 
 emit_queue_deleted_events(Ref, Subs) ->
-    [{send_msg, S, {queue_deleted, Ref}, ra_event} || S <- Subs].
+    [{send_msg, S, {queue_deleted, Ref}} || S <- Subs].
 
 emit_leader_down_events(Ref, Pid, Subs) ->
-    [{send_msg, S, {leader_down, Ref, Pid}, ra_event} || S <- Subs].
+    [{send_msg, S, {leader_down, Ref, Pid}} || S <- Subs].
 
 emit_leader_up_events(Ref, Pid, Subs) ->
-    [{send_msg, S, {leader_up, Ref, Pid}, ra_event} || S <- Subs].
+    [{send_msg, S, {leader_up, Ref, Pid}} || S <- Subs].
 
 leader_event(#{reference := Ref, leader_pid := Pid}, Subscriber) ->
     case rabbit_misc:is_process_alive(Pid) of
         true ->
-            {send_msg, Subscriber, {leader_up, Ref, Pid}, ra_event};
+            {send_msg, Subscriber, {leader_up, Ref, Pid}};
         false ->
-            {send_msg, Subscriber, {leader_down, Ref, Pid}, ra_event}
+            {send_msg, Subscriber, {leader_down, Ref, Pid}}
     end.

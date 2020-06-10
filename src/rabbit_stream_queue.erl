@@ -135,11 +135,11 @@ stat(_) ->
     {ok, 0, 0}.
 
 subscribe(QName) ->
-    {ok, Reply, _} = rabbit_stream_coordinator:subscribe(queue_name(QName)),
+    {ok, Reply, _} = rabbit_stream_coordinator:subscribe(queue_name(QName), self()),
     Reply.
 
 unsubscribe(QName) ->
-    {ok, Reply, _} = rabbit_stream_coordinator:unsubscribe(queue_name(QName)),
+    {ok, Reply, _} = rabbit_stream_coordinator:unsubscribe(queue_name(QName), self()),
     Reply.
 
 consume(Q, #{prefetch_count := 0}, _)
