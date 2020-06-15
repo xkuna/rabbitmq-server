@@ -666,7 +666,6 @@ consume(Q, Spec, QState0) when ?amqqueue_is_quorum(Q) ->
                     AckRequired, QName, Prefetch,
                     Args, none, ActingUser),
             {ok, QState};
->>>>>>> origin/master
         {error, Error} ->
             Error;
         {timeout, _} ->
