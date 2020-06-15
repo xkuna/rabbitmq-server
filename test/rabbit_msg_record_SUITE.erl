@@ -91,7 +91,6 @@ ampq091_roundtrip(_Config) ->
     ok.
 
 message_id_ulong(_Config) ->
-    %% fake a uuid
     Num = 9876789,
     ULong = erlang:integer_to_binary(Num),
     P = #'v1_0.properties'{message_id = {ulong, Num},

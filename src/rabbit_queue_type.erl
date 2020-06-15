@@ -526,32 +526,29 @@ set_ctx(QRef, Ctx, #?STATE{ctxs = Contexts} = State) ->
 
 qref(#resource{kind = queue} = QName) ->
     QName;
-% qref({Name, _}) -> Name;
 qref(Q) when ?is_amqqueue(Q) ->
     amqqueue:get_name(Q).
-%% assume it already is a ref
-% qref(Ref) -> Ref.
 
-
+return_ok(State0, []) ->
+    {ok, State0, []};
 return_ok(State0, Actions0) ->
     {State, Actions} =
-    lists:foldl(
-      fun({monitor, Pid, QRef},
-          {#?STATE{monitor_registry = M0} = S0, A0}) ->
-              case M0 of
-                  #{Pid := QRef} ->
-                      %% already monitored by the qref
-                      {S0, A0};
-                  #{Pid := _} ->
-                      %% TODO: allow multiple Qrefs to monitor the same pid
-                      exit(return_ok_duplicate_montored_pid);
-                  _ ->
-                      % rabbit_log:debug("queue type monitoring ~w", [Pid]),
-                      _ = erlang:monitor(process, Pid),
-                      M = M0#{Pid => QRef},
-                      {S0#?STATE{monitor_registry = M}, A0}
-              end;
-         (Act, {S, A0}) ->
-              {S, [Act | A0]}
-      end, {State0, []}, Actions0),
+        lists:foldl(
+          fun({monitor, Pid, QRef},
+              {#?STATE{monitor_registry = M0} = S0, A0}) ->
+                  case M0 of
+                      #{Pid := QRef} ->
+                          %% already monitored by the qref
+                          {S0, A0};
+                      #{Pid := _} ->
+                          %% TODO: allow multiple Qrefs to monitor the same pid
+                          exit(return_ok_duplicate_montored_pid);
+                      _ ->
+                          _ = erlang:monitor(process, Pid),
+                          M = M0#{Pid => QRef},
+                          {S0#?STATE{monitor_registry = M}, A0}
+                  end;
+             (Act, {S, A0}) ->
+                  {S, [Act | A0]}
+          end, {State0, []}, Actions0),
     {ok, State, lists:reverse(Actions)}.

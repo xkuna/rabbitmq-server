@@ -141,7 +141,7 @@ ensure_coordinator_started() ->
     AllNodes = all_nodes(),
     case ra:restart_server(Local) of
         {error, Reason} when Reason == not_started orelse
-                             Reason == name_not_registered -> 
+                             Reason == name_not_registered ->
             OtherNodes = all_nodes() -- [Local],
             %% We can't use find_members/0 here as a process that timeouts means the cluster is up
             case lists:filter(fun(N) -> global:whereis_name(N) =/= undefined end, OtherNodes) of

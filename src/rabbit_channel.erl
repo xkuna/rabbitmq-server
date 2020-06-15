@@ -538,7 +538,7 @@ init([Channel, ReaderPid, WriterPid, ConnPid, ConnName, Protocol, User, VHost,
                 queue_consumers         = #{},
                 confirm_enabled         = false,
                 publish_seqno           = 1,
-                unconfirmed             = unconfirmed_messages:new(),
+                unconfirmed             = rabbit_confirms:init(),
                 rejected                = [],
                 confirmed               = [],
                 reply_consumer          = none,
@@ -751,11 +751,11 @@ handle_cast({queue_event, QRef, Evt},
             noreply_coalesce(State);
         eol ->
             State1 = handle_consuming_queue_down_or_eol(QRef, QRef, State0),
-            {ConfirmMXs, RejectMXs, UC1} =
-                unconfirmed_messages:forget_ref(QRef, State1#ch.unconfirmed),
+            {ConfirmMXs, UC1} =
+                rabbit_confirms:remove_queue(QRef, State1#ch.unconfirmed),
             %% Deleted queue is a special case.
             %% Do not nack the "rejected" messages.
-            State2 = record_confirms(ConfirmMXs ++ RejectMXs,
+            State2 = record_confirms(ConfirmMXs,
                                      State1#ch{unconfirmed = UC1}),
             erase_queue_stats(QRef),
             noreply_coalesce(
@@ -797,11 +797,11 @@ handle_info({'DOWN', _MRef, process, QPid, Reason},
             noreply_coalesce(State);
         {eol, QRef} ->
             State1 = handle_consuming_queue_down_or_eol(QRef, QRef, State0),
-            {ConfirmMXs, RejectMXs, UC1} =
-                unconfirmed_messages:forget_ref(QRef, State1#ch.unconfirmed),
+            {ConfirmMXs, UC1} =
+                rabbit_confirms:remove_queue(QRef, State1#ch.unconfirmed),
             %% Deleted queue is a special case.
             %% Do not nack the "rejected" messages.
-            State2 = record_confirms(ConfirmMXs ++ RejectMXs,
+            State2 = record_confirms(ConfirmMXs,
                                      State1#ch{unconfirmed = UC1}),
             erase_queue_stats(QRef),
             noreply_coalesce(
@@ -2090,16 +2090,6 @@ deliver_to_queues({Delivery = #delivery{message    = Message = #basic_message{
         rabbit_queue_type:deliver(Qs, Delivery, QueueStates0),
     State1 = handle_queue_actions(Actions,
                                   State0#ch{queue_states = QueueStates}),
-    %% The maybe_monitor_all/2 monitors all queues to which we
-    %% delivered. But we want to monitor even queues we didn't deliver
-    %% to, since we need their 'DOWN' messages to clean
-    %% queue_names. So we also need to monitor each QPid from
-    %% queues. But that only gets the masters (which is fine for
-    %% cleaning queue_names), so we need the union of both.
-    %%
-    %% ...and we need to add even non-delivered queues to queue_names
-    %% since alternative algorithms to update queue_names less
-    %% frequently would in fact be more expensive in the common case.
     %% NB: the order here is important since basic.returns must be
     %% sent before confirms.
     %% TODO: fix - HACK TO WORK OUT ALL QREFS
@@ -2110,7 +2100,6 @@ deliver_to_queues({Delivery = #delivery{message    = Message = #basic_message{
     ok = process_routing_mandatory(Mandatory, AllDeliveredQRefs,
                                    Message, State1),
     State = process_routing_confirm(Confirm,
-                                    AllDeliveredQRefs,
                                     AllDeliveredQRefs,
                                     MsgSeqNo,
                                     XName, State1),
@@ -2138,25 +2127,22 @@ process_routing_mandatory(_Mandatory = false,
 process_routing_mandatory(_, _, _, _) ->
     ok.
 
-process_routing_confirm(false, _, _, _, _, State) ->
+process_routing_confirm(false, _, _, _, State) ->
     State;
-process_routing_confirm(true, [], _, MsgSeqNo, XName, State) ->
+process_routing_confirm(true, [], MsgSeqNo, XName, State) ->
     record_confirms([{MsgSeqNo, XName}], State);
-process_routing_confirm(true, QRefs, QNames, MsgSeqNo, XName, State) ->
+process_routing_confirm(true, QRefs, MsgSeqNo, XName, State) ->
     State#ch{unconfirmed =
-        unconfirmed_messages:insert(MsgSeqNo, QNames, QRefs, XName,
-                                    State#ch.unconfirmed)}.
+        rabbit_confirms:insert(MsgSeqNo, QRefs, XName, State#ch.unconfirmed)}.
 
 confirm(MsgSeqNos, QRef, State = #ch{unconfirmed = UC}) ->
     %% NOTE: if queue name does not exist here it's likely that the ref also
     %% does not exist in unconfirmed messages.
     %% Neither does the 'ignore' atom, so it's a reasonable fallback.
-    {ConfirmMXs, RejectMXs, UC1} =
-        unconfirmed_messages:confirm_multiple_msg_ref(MsgSeqNos, QRef, QRef, UC),
-
+    {ConfirmMXs, UC1} = rabbit_confirms:confirm(MsgSeqNos, QRef, UC),
     %% NB: don't call noreply/1 since we don't want to send confirms.
-    State1 = record_confirms(ConfirmMXs, State#ch{unconfirmed = UC1}),
-    record_rejects(RejectMXs, State1).
+    record_confirms(ConfirmMXs, State#ch{unconfirmed = UC1}).
+    % record_rejects(RejectMXs, State1).
 
 send_confirms_and_nacks(State = #ch{tx = none, confirmed = [], rejected = []}) ->
     State;
@@ -2217,9 +2203,9 @@ send_confirms(Cs, Rs, State) ->
 
 coalesce_and_send(MsgSeqNos, NegativeMsgSeqNos, MkMsgFun, State = #ch{unconfirmed = UC}) ->
     SMsgSeqNos = lists:usort(MsgSeqNos),
-    UnconfirmedCutoff = case unconfirmed_messages:is_empty(UC) of
+    UnconfirmedCutoff = case rabbit_confirms:is_empty(UC) of
                  true  -> lists:last(SMsgSeqNos) + 1;
-                 false -> unconfirmed_messages:smallest(UC)
+                 false -> rabbit_confirms:smallest(UC)
              end,
     Cutoff = lists:min([UnconfirmedCutoff | NegativeMsgSeqNos]),
     {Ms, Ss} = lists:splitwith(fun(X) -> X < Cutoff end, SMsgSeqNos),
@@ -2238,7 +2224,7 @@ ack_len(Acks) -> lists:sum([length(L) || {ack, L} <- Acks]).
 maybe_complete_tx(State = #ch{tx = {_, _}}) ->
     State;
 maybe_complete_tx(State = #ch{unconfirmed = UC}) ->
-    case unconfirmed_messages:is_empty(UC) of
+    case rabbit_confirms:is_empty(UC) of
         false -> State;
         true  -> complete_tx(State#ch{confirmed = []})
     end.
@@ -2277,7 +2263,7 @@ i(transactional,  #ch{tx               = Tx})      -> Tx =/= none;
 i(confirm,        #ch{confirm_enabled  = CE})      -> CE;
 i(name,           State)                           -> name(State);
 i(consumer_count,          #ch{consumer_mapping = CM})    -> maps:size(CM);
-i(messages_unconfirmed,    #ch{unconfirmed = UC})         -> unconfirmed_messages:size(UC);
+i(messages_unconfirmed,    #ch{unconfirmed = UC})         -> rabbit_confirms:size(UC);
 i(messages_unacknowledged, #ch{unacked_message_q = UAMQ}) -> ?QUEUE:len(UAMQ);
 i(messages_uncommitted,    #ch{tx = {Msgs, _Acks}})       -> ?QUEUE:len(Msgs);
 i(messages_uncommitted,    #ch{})                         -> 0;
@@ -2722,21 +2708,17 @@ handle_queue_actions(Actions, #ch{} = State0) ->
                      #'basic.credit_drained'{consumer_tag   = CTag,
                                              credit_drained = Credit}),
               S0;
-          % ({monitor, Pid, _QRef}, #ch{queue_monitors = Mons} = S0) ->
-          %     S0#ch{queue_monitors = pmon:monitor(Pid, Mons)};
           ({settled, QRef, MsgSeqNos}, S0) ->
               confirm(MsgSeqNos, QRef, S0);
           ({rejected, _QRef, MsgSeqNos}, S0) ->
               {U, Rej} =
                   lists:foldr(
                     fun(SeqNo, {U1, Acc}) ->
-                            {Rej, U2} = unconfirmed_messages:reject_msg(
-                                          SeqNo, U1),
-                            case Rej of
-                                not_confirmed ->
-                                    {U2, Acc};
-                                {rejected, MX} ->
-                                    {U2, [MX | Acc]}
+                            case rabbit_confirms:reject(SeqNo, U1) of
+                                {ok, MX, U2} ->
+                                    {U2, [MX | Acc]};
+                                {error, not_found} ->
+                                    Acc
                             end
                     end, {S0#ch.unconfirmed, []}, MsgSeqNos),
               S = S0#ch{unconfirmed = U},
