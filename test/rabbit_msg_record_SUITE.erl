@@ -114,7 +114,7 @@ message_id_ulong(_Config) ->
 message_id_uuid(_Config) ->
     %% fake a uuid
     UUId = erlang:md5(term_to_binary(make_ref())),
-    TextUUId = rabbit_guid:to_string(UUId),
+    TextUUId = rabbit_data_coercion:to_binary(rabbit_guid:to_string(UUId)),
     P = #'v1_0.properties'{message_id = {uuid, UUId},
                            correlation_id = {uuid, UUId}},
     D =  #'v1_0.data'{content = <<"data">>},

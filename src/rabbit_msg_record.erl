@@ -185,13 +185,7 @@ from_amqp091(#'P_basic'{message_id = MsgId,
                            user_id = wrap(binary, UserId),
                            to = undefined,
                            % subject = wrap(utf8, RKey),
-                           reply_to = case ReplyTo of
-                                          undefined ->
-                                              undefined;
-                                          _ ->
-                                              wrap(utf8,
-                                                   <<"/queue/", ReplyTo/binary>>)
-                                      end,
+                           reply_to = wrap(utf8, ReplyTo),
                            correlation_id = wrap(utf8, CorrId),
                            content_type = wrap(symbol, ContentType),
                            content_encoding = wrap(symbol, ContentEncoding),
@@ -270,12 +264,7 @@ to_amqp091(#?MODULE{msg = #msg{properties = P,
                                   [] -> undefined;
                                   _ -> Headers
                               end,
-                    reply_to = case ReplyTo0 of
-                                   undefined ->
-                                       undefined;
-                                   {utf8, ReplyTo} ->
-                                       ReplyTo
-                               end,
+                    reply_to = unwrap(ReplyTo0),
                     type = Type,
                     app_id = AppId,
                     priority = Priority,
