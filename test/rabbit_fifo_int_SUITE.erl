@@ -474,12 +474,14 @@ test_queries(Config) ->
     ClusterName = ?config(cluster_name, Config),
     ServerId = ?config(node_id, Config),
     ok = start_cluster(ClusterName, [ServerId]),
+    Self = self(),
     P = spawn(fun () ->
                   F0 = rabbit_fifo_client:init(ClusterName, [ServerId], 4),
                   {ok, F1} = rabbit_fifo_client:enqueue(m1, F0),
                   {ok, F2} = rabbit_fifo_client:enqueue(m2, F1),
                   process_ra_events(receive_ra_events(2, 0), F2),
-                  receive stop ->  ok end
+                  Self ! ready,
+                  receive stop -> ok end
           end),
     F0 = rabbit_fifo_client:init(ClusterName, [ServerId], 4),
     {ok, _} = rabbit_fifo_client:checkout(<<"tag">>, 1, #{}, F0),

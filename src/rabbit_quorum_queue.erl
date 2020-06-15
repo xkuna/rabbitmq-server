@@ -217,11 +217,7 @@ cancel_consumer_handler(QName, {ConsumerTag, ChPid}) ->
 
 cancel_consumer(QName, ChPid, ConsumerTag) ->
     catch rabbit_core_metrics:consumer_deleted(ChPid, ConsumerTag, QName),
-    rabbit_event:notify(consumer_deleted,
-                        [{consumer_tag, ConsumerTag},
-                         {channel,      ChPid},
-                         {queue,        QName},
-                         {user_who_performed_action, ?INTERNAL_USER}]).
+    emit_consumer_deleted(ChPid, ConsumerTag, QName, ?INTERNAL_USER).
 
 local_or_remote_handler(ChPid, Module, Function, Args) ->
     Node = node(ChPid),
@@ -640,7 +636,8 @@ consume(Q, Spec, QState0) when ?amqqueue_is_quorum(Q) ->
                    Other -> Other
                end,
     %% consumer info is used to describe the consumer properties
-    ConsumerMeta = #{ack => not NoAck,
+    AckRequired = not NoAck,
+    ConsumerMeta = #{ack => AckRequired,
                      prefetch => ConsumerPrefetchCount,
                      args => Args,
                      username => ActingUser},
@@ -651,7 +648,6 @@ consume(Q, Spec, QState0) when ?amqqueue_is_quorum(Q) ->
     case ra:local_query(QPid,
                         fun rabbit_fifo:query_single_active_consumer/1) of
         {ok, {_, SacResult}, _} ->
-
             SingleActiveConsumerOn = single_active_consumer_on(Q),
             {IsSingleActiveConsumer, ActivityStatus} = case {SingleActiveConsumerOn, SacResult} of
                                                            {false, _} ->
@@ -661,13 +657,16 @@ consume(Q, Spec, QState0) when ?amqqueue_is_quorum(Q) ->
                                                            _ ->
                                                                {false, waiting}
                                                        end,
-
-            %% TODO: emit as rabbit_fifo effect
-            rabbit_core_metrics:consumer_created(ChPid, ConsumerTag, ExclusiveConsume,
-                                                 not NoAck, QName,
-                                                 ConsumerPrefetchCount, IsSingleActiveConsumer,
-                                                 ActivityStatus, Args),
-            {ok, QState, []};
+            rabbit_core_metrics:consumer_created(
+                    ChPid, ConsumerTag, ExclusiveConsume,
+                    AckRequired, QName,
+                    ConsumerPrefetchCount, IsSingleActiveConsumer,
+                    ActivityStatus, Args),
+            emit_consumer_created(ChPid, ConsumerTag, ExclusiveConsume,
+                    AckRequired, QName, Prefetch,
+                    Args, none, ActingUser),
+            {ok, QState};
+>>>>>>> origin/master
         {error, Error} ->
             Error;
         {timeout, _} ->
@@ -680,6 +679,25 @@ consume(Q, Spec, QState0) when ?amqqueue_is_quorum(Q) ->
 cancel(_Q, ConsumerTag, OkMsg, _ActingUser, State) ->
     maybe_send_reply(self(), OkMsg),
     rabbit_fifo_client:cancel_checkout(quorum_ctag(ConsumerTag), State).
+
+emit_consumer_created(ChPid, CTag, Exclusive, AckRequired, QName, PrefetchCount, Args, Ref, ActingUser) ->
+    rabbit_event:notify(consumer_created,
+                        [{consumer_tag,   CTag},
+                         {exclusive,      Exclusive},
+                         {ack_required,   AckRequired},
+                         {channel,        ChPid},
+                         {queue,          QName},
+                         {prefetch_count, PrefetchCount},
+                         {arguments,      Args},
+                         {user_who_performed_action, ActingUser}],
+                        Ref).
+
+emit_consumer_deleted(ChPid, ConsumerTag, QName, ActingUser) ->
+    rabbit_event:notify(consumer_deleted,
+        [{consumer_tag, ConsumerTag},
+            {channel, ChPid},
+            {queue, QName},
+            {user_who_performed_action, ActingUser}]).
 
 -spec stateless_deliver(amqqueue:ra_server_id(), rabbit_types:delivery()) -> 'ok'.
 

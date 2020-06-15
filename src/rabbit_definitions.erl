@@ -19,7 +19,7 @@
 
 -export([boot/0]).
 %% automatic import on boot
--export([maybe_load_definitions/0, maybe_load_definitions_from/2]).
+-export([maybe_load_definitions/0, maybe_load_definitions/2, maybe_load_definitions_from/2]).
 %% import
 -export([import_raw/1, import_raw/2, import_parsed/1, import_parsed/2,
          apply_defs/2, apply_defs/3, apply_defs/4, apply_defs/5]).
@@ -66,17 +66,10 @@ boot() ->
     rabbit_sup:start_supervisor_child(definition_import_pool_sup, worker_pool_sup, [PoolSize, ?IMPORT_WORK_POOL]).
 
 maybe_load_definitions() ->
-    %% this feature was a part of rabbitmq-management for a long time,
-    %% so we check rabbit_management.load_definitions for backward compatibility.
-    maybe_load_management_definitions(),
-    %% this backs "core" load_definitions
-    maybe_load_core_definitions().
-
-maybe_load_core_definitions() ->
+    rabbit_log:debug("Will import definitions file from load_definitions"),
+    %% Note that management.load_definitions is handled in the plugin for backwards compatibility.
+    %% This executes the "core" version of load_definitions.
     maybe_load_definitions(rabbit, load_definitions).
-
-maybe_load_management_definitions() ->
-    maybe_load_definitions(rabbitmq_management, load_definitions).
 
 -spec import_raw(Body :: binary() | iolist()) -> ok | {error, term()}.
 import_raw(Body) ->
@@ -597,24 +590,11 @@ build_filtered_map([Queue|Rest], AccMap0) ->
     {Rec, VHost} = build_queue_data(Queue),
     case rabbit_amqqueue:lookup(Rec) of
         {error, not_found} ->
-            AccMap1 = maps_update_with(VHost, fun(V) -> V + 1 end, 1, AccMap0),
+            AccMap1 = maps:update_with(VHost, fun(V) -> V + 1 end, 1, AccMap0),
             build_filtered_map(Rest, AccMap1);
         {ok, _} ->
             build_filtered_map(Rest, AccMap0)
     end.
-
-%% Copy of maps:with_util/3 from Erlang 20.0.1.
-maps_update_with(Key,Fun,Init,Map) when is_function(Fun,1), is_map(Map) ->
-    case maps:find(Key,Map) of
-        {ok,Val} -> maps:update(Key,Fun(Val),Map);
-        error -> maps:put(Key,Init,Map)
-    end;
-maps_update_with(Key,Fun,Init,Map) ->
-    erlang:error(maps_error_type(Map),[Key,Fun,Init,Map]).
-
-%% Copy of maps:error_type/1 from Erlang 20.0.1.
-maps_error_type(M) when is_map(M) -> badarg;
-maps_error_type(V) -> {badmap, V}.
 
 validate_vhost_limit(VHost, AddCount, ok) ->
     WouldExceed = rabbit_vhost_limit:would_exceed_queue_limit(AddCount, VHost),

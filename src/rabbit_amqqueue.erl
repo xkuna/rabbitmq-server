@@ -1037,7 +1037,8 @@ list_local_mirrored_classic_names() ->
            is_local_to_node(amqqueue:get_pid(Q), node()),
            is_replicated(Q)].
 
--spec list_local_mirrored_classic_without_synchronised_mirrors() -> [amqqueue:amqqueue()].
+-spec list_local_mirrored_classic_without_synchronised_mirrors() ->
+    [amqqueue:amqqueue()].
 list_local_mirrored_classic_without_synchronised_mirrors() ->
     [ Q || Q <- list(),
          amqqueue:get_state(Q) =/= crashed,
@@ -1047,7 +1048,7 @@ list_local_mirrored_classic_without_synchronised_mirrors() ->
          not has_synchronised_mirrors_online(Q)].
 
 -spec list_local_mirrored_classic_without_synchronised_mirrors_for_cli() ->
-    [maps:map()].
+    [#{binary => any()}].
 list_local_mirrored_classic_without_synchronised_mirrors_for_cli() ->
     ClassicQs = list_local_mirrored_classic_without_synchronised_mirrors(),
     [begin
@@ -1360,12 +1361,12 @@ stat(Q) ->
     rabbit_queue_type:stat(Q).
 
 -spec pid_of(amqqueue:amqqueue()) ->
-          {'ok', pid()} | rabbit_types:error('not_found').
+          pid().
 
 pid_of(Q) -> amqqueue:get_pid(Q).
 
 -spec pid_of(rabbit_types:vhost(), rabbit_misc:resource_name()) ->
-          {'ok', pid()} | rabbit_types:error('not_found').
+          pid() | rabbit_types:error('not_found').
 
 pid_of(VHost, QueueName) ->
   case lookup(rabbit_misc:r(VHost, queue, QueueName)) of

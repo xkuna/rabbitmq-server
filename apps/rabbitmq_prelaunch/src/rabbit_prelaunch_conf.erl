@@ -67,6 +67,7 @@ setup(Context) ->
                       config_advanced_file => undefined}
             end,
     ok = override_with_hard_coded_critical_config(),
+    ok = set_credentials_obfuscation_secret(),
     rabbit_log_prelaunch:debug(
       "Saving config state to application env: ~p", [State]),
     store_config_state(State).
@@ -117,14 +118,14 @@ find_actual_main_config_file(#{main_config_file := File}) ->
                     case filelib:is_regular(NewFormatFile) of
                         true ->
                             rabbit_log_prelaunch:warning(
-                              "Both old (.config) and new (.conf) format config "
-                              "files exist."),
+                              "Both old (.config) and new (.conf) format "
+                              "config files exist."),
                             rabbit_log_prelaunch:warning(
                               "Using the old format config file: ~s",
                               [OldFormatFile]),
                             rabbit_log_prelaunch:warning(
-                              "Please update your config files to the new format "
-                              "and remove the old file."),
+                              "Please update your config files to the new "
+                              "format and remove the old file."),
                             ok;
                         false ->
                             ok
@@ -210,9 +211,12 @@ generate_config_from_cuttlefish_files(Context,
             rabbit_log_prelaunch:error("Error parsing configuration:"),
             lists:foreach(
               fun(Error) ->
-                      rabbit_log_prelaunch:error("  - ~ts", [cuttlefish_error:xlate(Error)])
+                      rabbit_log_prelaunch:error(
+                        "  - ~ts",
+                        [cuttlefish_error:xlate(Error)])
               end, Errors),
-            rabbit_log_prelaunch:error("Are these files using the Cuttlefish format?"),
+            rabbit_log_prelaunch:error(
+              "Are these files using the Cuttlefish format?"),
             throw({error, failed_to_parse_configuration_file});
         Config0 ->
             %% Finalize configuration, based on the schema.
@@ -362,13 +366,21 @@ apply_erlang_term_based_config([]) ->
     ok.
 
 apply_app_env_vars(App, [{Var, Value} | Rest]) ->
-    rabbit_log_prelaunch:debug(
-      "    - ~s = ~p",
-      [Var, Value]),
+    rabbit_log_prelaunch:debug("    - ~s = ~p", [Var, Value]),
     ok = application:set_env(App, Var, Value, [{persistent, true}]),
     apply_app_env_vars(App, Rest);
 apply_app_env_vars(_, []) ->
     ok.
+
+set_credentials_obfuscation_secret() ->
+    rabbit_log_prelaunch:debug(
+      "Refreshing credentials obfuscation configuration from env: ~p",
+      [application:get_all_env(credentials_obfuscation)]),
+    ok = credentials_obfuscation:refresh_config(),
+    CookieBin = rabbit_data_coercion:to_binary(erlang:get_cookie()),
+    rabbit_log_prelaunch:debug(
+      "Setting credentials obfuscation secret to '~s'", [CookieBin]),
+    ok = credentials_obfuscation:set_secret(CookieBin).
 
 %% -------------------------------------------------------------------
 %% Config decryption.
@@ -407,15 +419,15 @@ decrypt_app(App, [{Key, Value} | Tail], Algo) ->
             end,
     decrypt_app(App, Tail, Algo2).
 
-decrypt({encrypted, EncValue},
+decrypt({encrypted, _} = EncValue,
         {Cipher, Hash, Iterations, PassPhrase} = Algo) ->
     {rabbit_pbe:decrypt_term(Cipher, Hash, Iterations, PassPhrase, EncValue),
      Algo};
-decrypt({encrypted, _} = Value,
+decrypt({encrypted, _} = EncValue,
         ConfigEntryDecoder)
   when is_list(ConfigEntryDecoder) ->
     Algo = config_entry_decoder_to_algo(ConfigEntryDecoder),
-    decrypt(Value, Algo);
+    decrypt(EncValue, Algo);
 decrypt(List, Algo) when is_list(List) ->
     decrypt_list(List, Algo, []);
 decrypt(Value, Algo) ->
@@ -445,7 +457,8 @@ config_entry_decoder_to_algo(ConfigEntryDecoder) ->
              proplists:get_value(
                hash, ConfigEntryDecoder, rabbit_pbe:default_hash()),
              proplists:get_value(
-               iterations, ConfigEntryDecoder, rabbit_pbe:default_iterations()),
+               iterations, ConfigEntryDecoder,
+               rabbit_pbe:default_iterations()),
              PassPhrase
             }
     end.

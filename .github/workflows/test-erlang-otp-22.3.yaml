@@ -28,25 +28,26 @@ jobs:
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           echo "::set-output name=branch_or_tag_name::$branch_or_tag_name"
           make check-rabbitmq-components.mk base_rmq_ref=master current_rmq_ref=$branch_or_tag_name
-      # https://help.github.com/en/actions/configuring-and-managing-workflows/caching-dependencies-to-speed-up-workflows
-      - name: CACHE DEPS
-        uses: actions/cache@v1
-        with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
       - name: RESOLVE & COMPILE DEPS
         run: |
           make deps test-deps base_rmq_ref=master current_rmq_ref=${{ steps.ref.outputs.branch_or_tag_name }}
           echo "Capture versions of the RabbitMQ components used in this workflow..."
           make rabbit-rabbitmq-deps.mk
-          mv rabbit-rabbitmq-deps.mk deps/
           echo "Remove directories not used in the subsequent jobs..."
           rm -fr deps/*/{.git,test}
       - name: UPLOAD DEPS VERSIONS
-        uses: actions/upload-artifact@v2-preview
+        uses: actions/upload-artifact@v2
         with:
           name: rabbit-rabbitmq-deps.mk
-          path: deps/rabbit-rabbitmq-deps.mk
+          path: rabbit-rabbitmq-deps.mk
+      - name: CREATE DEPS ARCHIVE
+        run: |
+          tar cf - deps | xz > deps.tar.xz
+      - name: UPLOAD DEPS ARCHIVE
+        uses: actions/upload-artifact@v2
+        with:
+          name: deps.tar.xz
+          path: deps.tar.xz
       - name: CHECK CROSS REFERENCES
         run: |
           make xref base_rmq_ref=master current_rmq_ref=${{ steps.ref.outputs.branch_or_tag_name }}
@@ -58,23 +59,27 @@ jobs:
         uses: actions/cache@v1
         with:
           path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          key: secondary-umbrellas-v3.7.x-v3.8.x-erlang-22.3-rev4
       - name: PREPARE SECONDARY UMBRELLA COPIES
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
-          if ! test -f umbrellas/.ready; then
-            git config --global advice.detachedHead false
-            # We recreate the directory in case something incomplete was
-            # cached.
-            rm -rf umbrellas
-            mkdir -p umbrellas
-            git clone \
-              https://github.com/rabbitmq/rabbitmq-public-umbrella.git \
-              umbrellas/master
-            make -C umbrellas/master co # To get RabbitMQ components.
-            for version in v3.7.x v3.8.3; do
-              umbrella="umbrellas/$version"
+          set -ex
+          for version in v3.7.x v3.8.x; do
+            umbrella="umbrellas/$version"
+            if ! test -d "$umbrella"  ||
+               ! make -C "$umbrella/deps/rabbit" test-dist; then
+              rm -rf "$umbrella"
+
+              # Fetch the master Umbrella; the final umbrellas are created from
+              # the master copy.
+              if ! test -d umbrellas/master; then
+                git config --global advice.detachedHead false
+                git clone \
+                  https://github.com/rabbitmq/rabbitmq-public-umbrella.git \
+                  umbrellas/master
+                make -C umbrellas/master co # To get RabbitMQ components.
+              fi
+
               # We copy the master Umbrella and checkout the appropriate tag.
               cp -a umbrellas/master "$umbrella"
               git -C "$umbrella" checkout "master"
@@ -86,11 +91,58 @@ jobs:
               make -C "$umbrella" clean-3rd-party-repos
               make -C "$umbrella" up
               make -C "$umbrella/deps/rabbit" test-dist
-              rm -fr "$umbrella"/deps/*/{.git,test} "$umbrella"/.git
-            done
-            rm -fr umbrellas/master
-            touch umbrellas/.ready
-          fi
+              rm -rf "$umbrella"/deps/rabbitmq_website
+              rm -rf "$umbrella"/deps/rabbitmq_prometheus/docker
+              rm -rf "$umbrella"/deps/*/{.git,test} "$umbrella"/.git
+            fi
+          done
+          rm -fr umbrellas/master
+      - name: CREATE SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar cf - umbrellas | xz > secondary-umbrellas.tar.xz
+      - name: UPLOAD SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        uses: actions/upload-artifact@v2
+        with:
+          name: secondary-umbrellas.tar.xz
+          path: secondary-umbrellas.tar.xz
+  # vim:sw=2:et:
+  dialyzer:
+    name: dialyzer
+    needs: [checks]
+    runs-on: ubuntu-18.04
+    steps:
+      - name: CHECKOUT REPOSITORY
+        if: success() && 'latest' == 'latest'
+        uses: actions/checkout@v2
+      # https://github.com/marketplace/actions/setup-elixir
+      - name: CONFIGURE OTP & ELIXIR
+        if: success() && 'latest' == 'latest'
+        uses: actions/setup-elixir@v1
+        with:
+          otp-version: 22.3
+          # https://github.com/elixir-lang/elixir/releases
+          elixir-version: 1.8.0
+      - name: DOWNLOAD DEPS ARCHIVE
+        if: success() && 'latest' == 'latest'
+        uses: actions/download-artifact@v2
+        with:
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        if: success() && 'latest' == 'latest'
+        run: |
+          tar Jxf deps.tar.xz
+          rm deps.tar.xz
+      - name: RUN DIALYZER
+        if: success() && 'latest' == 'latest'
+        run: |
+          branch_or_tag_name=${GITHUB_REF#refs/*/}
+          make dialyze \
+            base_rmq_ref=master \
+            current_rmq_ref=$branch_or_tag_name \
+            FULL=
   # vim:sw=2:et:
   eunit:
     needs: [checks]
@@ -107,11 +159,14 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
+          rm deps.tar.xz
       - name: RUN TESTS
         run: |
           ! test -d ebin || touch ebin/*
@@ -138,11 +193,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -153,19 +210,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-amqqueue_backward_compatibility \
@@ -204,11 +266,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -219,19 +283,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-backing_queue \
@@ -270,11 +339,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -285,19 +356,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-channel_interceptor \
@@ -336,11 +412,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -351,19 +429,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-channel_operation_timeout \
@@ -402,11 +485,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -417,19 +502,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-cluster \
@@ -468,11 +558,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -483,19 +575,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-cluster_rename \
@@ -534,11 +631,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -549,19 +648,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-clustering_management \
@@ -600,11 +704,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -615,19 +721,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-config_schema \
@@ -666,11 +777,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -681,19 +794,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-confirms_rejects \
@@ -732,11 +850,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -747,19 +867,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-consumer_timeout \
@@ -798,11 +923,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -813,19 +940,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-crashing_queues \
@@ -864,11 +996,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -879,19 +1013,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-dead_lettering \
@@ -930,11 +1069,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -945,19 +1086,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-definition_import \
@@ -996,11 +1142,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -1011,19 +1159,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-disconnect_detected_during_alarm \
@@ -1062,11 +1215,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -1077,19 +1232,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-dynamic_ha \
@@ -1128,11 +1288,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -1143,19 +1305,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-dynamic_qq \
@@ -1194,11 +1361,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -1209,19 +1378,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-eager_sync \
@@ -1260,11 +1434,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -1275,19 +1451,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-feature_flags \
@@ -1326,11 +1507,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -1341,19 +1524,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-health_check \
@@ -1392,11 +1580,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -1407,19 +1597,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-lazy_queue \
@@ -1458,11 +1653,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -1473,19 +1670,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-list_consumers_sanity_check \
@@ -1524,11 +1726,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -1539,19 +1743,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-list_queues_online_and_offline \
@@ -1590,11 +1799,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -1605,19 +1816,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-many_node_ha \
@@ -1656,11 +1872,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -1671,19 +1889,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-message_size_limit \
@@ -1722,11 +1945,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -1737,19 +1962,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-metrics \
@@ -1788,11 +2018,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -1803,19 +2035,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-mirrored_supervisor \
@@ -1854,11 +2091,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -1869,19 +2108,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-msg_store \
@@ -1920,11 +2164,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -1935,19 +2181,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-peer_discovery_classic_config \
@@ -1986,11 +2237,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2001,19 +2254,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-peer_discovery_dns \
@@ -2052,11 +2310,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2067,19 +2327,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-per_user_connection_tracking \
@@ -2118,11 +2383,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2133,19 +2400,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-per_vhost_connection_limit \
@@ -2184,11 +2456,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2199,19 +2473,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-per_vhost_connection_limit_partitions \
@@ -2250,11 +2529,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2265,19 +2546,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-per_vhost_msg_store \
@@ -2316,11 +2602,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2331,19 +2619,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-per_vhost_queue_limit \
@@ -2382,11 +2675,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2397,19 +2692,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-policy \
@@ -2448,11 +2748,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2463,19 +2765,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-priority_queue \
@@ -2514,11 +2821,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2529,19 +2838,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-priority_queue_recovery \
@@ -2580,11 +2894,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2595,19 +2911,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-product_info \
@@ -2646,11 +2967,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2661,19 +2984,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-proxy_protocol \
@@ -2712,11 +3040,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2727,19 +3057,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-publisher_confirms_parallel \
@@ -2778,11 +3113,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2793,19 +3130,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-queue_length_limits \
@@ -2844,11 +3186,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2859,19 +3203,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-queue_master_location \
@@ -2910,11 +3259,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2925,19 +3276,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-queue_parallel \
@@ -2976,11 +3332,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -2991,19 +3349,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-quorum_queue \
@@ -3042,11 +3405,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -3057,19 +3422,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-rabbit_core_metrics_gc \
@@ -3108,11 +3478,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -3123,19 +3495,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-rabbit_fifo \
@@ -3174,11 +3551,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -3189,19 +3568,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-rabbit_fifo_int \
@@ -3240,11 +3624,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -3255,19 +3641,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-rabbit_fifo_prop \
@@ -3306,11 +3697,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -3321,19 +3714,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-rabbitmq_queues_cli_integration \
@@ -3372,11 +3770,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -3387,19 +3787,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-rabbitmqctl_integration \
@@ -3438,11 +3843,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -3453,19 +3860,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-rabbitmqctl_shutdown \
@@ -3504,11 +3916,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -3519,19 +3933,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-signal_handling \
@@ -3570,11 +3989,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -3585,19 +4006,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-simple_ha \
@@ -3636,11 +4062,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -3651,19 +4079,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-single_active_consumer \
@@ -3702,11 +4135,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -3717,19 +4152,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-sup_delayed_restart \
@@ -3768,11 +4208,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -3783,19 +4225,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-sync_detection \
@@ -3834,11 +4281,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -3849,19 +4298,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-term_to_binary_compat_prop \
@@ -3900,11 +4354,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -3915,19 +4371,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-topic_permission \
@@ -3966,11 +4427,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -3981,19 +4444,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_access_control \
@@ -4032,11 +4500,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -4047,19 +4517,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_access_control_authn_authz_context_propagation \
@@ -4098,11 +4573,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -4113,19 +4590,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_access_control_credential_validation \
@@ -4164,11 +4646,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -4179,19 +4663,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_amqp091_content_framing \
@@ -4230,11 +4719,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -4245,19 +4736,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_amqp091_server_properties \
@@ -4296,11 +4792,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -4311,19 +4809,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_app_management \
@@ -4362,11 +4865,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -4377,19 +4882,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_cluster_formation_locking_mocks \
@@ -4428,11 +4938,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -4443,19 +4955,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_collections \
@@ -4494,11 +5011,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -4509,19 +5028,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_config_value_encryption \
@@ -4560,11 +5084,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -4575,19 +5101,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_connection_tracking \
@@ -4626,11 +5157,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -4641,19 +5174,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_credit_flow \
@@ -4692,11 +5230,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -4707,19 +5247,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_disk_monitor \
@@ -4758,11 +5303,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -4773,19 +5320,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_disk_monitor_mocks \
@@ -4824,11 +5376,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -4839,19 +5393,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_file_handle_cache \
@@ -4890,11 +5449,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -4905,19 +5466,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_gen_server2 \
@@ -4956,11 +5522,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -4971,19 +5539,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_gm \
@@ -5022,11 +5595,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -5037,19 +5612,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_log_config \
@@ -5088,11 +5668,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -5103,19 +5685,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_log_management \
@@ -5154,11 +5741,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -5169,19 +5758,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_operator_policy \
@@ -5220,11 +5814,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -5235,19 +5831,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_pg_local \
@@ -5286,11 +5887,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -5301,19 +5904,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_plugin_directories \
@@ -5352,11 +5960,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -5367,19 +5977,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_plugin_versioning \
@@ -5403,6 +6018,79 @@ jobs:
           name: ct-unit_plugin_versioning-logs
           path: "*-ct-logs-*.tar.xz"
   # vim:sw=2:et:
+  ct-unit_policy_validators:
+    needs: [checks]
+    # https://help.github.com/en/actions/reference/context-and-expression-syntax-for-github-actions#contexts
+    name: ct-unit_policy_validators
+    runs-on: ubuntu-18.04
+    steps:
+      - name: CHECKOUT REPOSITORY
+        uses: actions/checkout@v2
+      # https://github.com/marketplace/actions/setup-elixir
+      - name: CONFIGURE OTP & ELIXIR
+        uses: actions/setup-elixir@v1
+        with:
+          otp-version: 22.3
+          # https://github.com/elixir-lang/elixir/releases
+          elixir-version: 1.8.0
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
+        with:
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
+      - name: RUN TESTS
+        run: |
+          branch_or_tag_name=${GITHUB_REF#refs/*/}
+          ! test -d ebin || touch ebin/*
+          make ct-unit_policy_validators \
+            base_rmq_ref=master \
+            current_rmq_ref=$branch_or_tag_name \
+            FULL= \
+            FAIL_FAST=1 \
+            SKIP_AS_ERROR=1
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        uses: actions/download-artifact@v2
+        with:
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
+      - name: RUN TESTS [mixed-versions]
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          branch_or_tag_name=${GITHUB_REF#refs/*/}
+          for umbrella in umbrellas/*; do
+            test -d "$umbrella"
+            printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
+              $(basename "$umbrella")
+            make distclean-ct ct-unit_policy_validators \
+              base_rmq_ref=master \
+              current_rmq_ref=$branch_or_tag_name \
+              FULL= \
+              FAIL_FAST=1 \
+              SKIP_AS_ERROR=1 \
+              SECONDARY_UMBRELLA=$PWD/$umbrella \
+              RABBITMQ_FEATURE_FLAGS=
+          done
+      - name: ON FAILURE ARCHIVE TESTS LOGS
+        if: failure()
+        run: |
+          make ct-logs-archive
+      - name: ON FAILURE UPLOAD TESTS LOGS ARTIFACT
+        # https://github.com/marketplace/actions/upload-artifact
+        uses: actions/upload-artifact@v2-preview
+        if: failure()
+        with:
+          name: ct-unit_policy_validators-logs
+          path: "*-ct-logs-*.tar.xz"
+  # vim:sw=2:et:
   ct-unit_priority_queue:
     needs: [checks]
     # https://help.github.com/en/actions/reference/context-and-expression-syntax-for-github-actions#contexts
@@ -5418,11 +6106,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -5433,19 +6123,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_priority_queue \
@@ -5484,11 +6179,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -5499,19 +6196,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_queue_consumers \
@@ -5550,11 +6252,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -5565,19 +6269,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_stats_and_metrics \
@@ -5616,11 +6325,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -5631,19 +6342,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_supervisor2 \
@@ -5682,11 +6398,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -5697,19 +6415,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-unit_vm_memory_monitor \
@@ -5748,11 +6471,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -5763,19 +6488,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-upgrade_preparation \
@@ -5814,11 +6544,13 @@ jobs:
           otp-version: 22.3
           # https://github.com/elixir-lang/elixir/releases
           elixir-version: 1.8.0
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - name: DOWNLOAD DEPS ARCHIVE
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: deps.tar.xz
+      - name: UNPACK DEPS ARCHIVE
+        run: |
+          tar Jxf deps.tar.xz
       - name: RUN TESTS
         run: |
           branch_or_tag_name=${GITHUB_REF#refs/*/}
@@ -5829,19 +6561,24 @@ jobs:
             FULL= \
             FAIL_FAST=1 \
             SKIP_AS_ERROR=1
-      - name: CACHE SECONDARY UMBRELLAS
+      - name: DOWNLOAD SECONDARY UMBRELLAS ARCHIVE
         if: success() && 'latest' == 'oldest'
-        uses: actions/cache@v1
+        uses: actions/download-artifact@v2
         with:
-          path: umbrellas
-          key: secondary-umbrellas-v3.7.x-v3.8.3-erlang-22.3-rev2
+          name: secondary-umbrellas.tar.xz
+      - name: UNPACK SECONDARY UMBRELLAS ARCHIVE
+        if: success() && 'latest' == 'oldest'
+        run: |
+          set -ex
+          tar Jxf secondary-umbrellas.tar.xz
+          rm secondary-umbrellas.tar.xz
       - name: RUN TESTS [mixed-versions]
         if: success() && 'latest' == 'oldest'
         run: |
-          set -x
+          set -ex
           branch_or_tag_name=${GITHUB_REF#refs/*/}
           for umbrella in umbrellas/*; do
-            test -d $umbrella
+            test -d "$umbrella"
             printf '\n\033[1;32mMixing clusters with RabbitMQ %s\033[0m' \
               $(basename "$umbrella")
             make distclean-ct ct-vhost \
@@ -5867,6 +6604,7 @@ jobs:
   # vim:sw=2:et:
   capture-tested-deps-versions:
     needs:
+      - dialyzer
       - eunit
       - ct-amqqueue_backward_compatibility
       - ct-backing_queue
@@ -5948,6 +6686,7 @@ jobs:
       - ct-unit_pg_local
       - ct-unit_plugin_directories
       - ct-unit_plugin_versioning
+      - ct-unit_policy_validators
       - ct-unit_priority_queue
       - ct-unit_queue_consumers
       - ct-unit_stats_and_metrics
@@ -5957,14 +6696,12 @@ jobs:
       - ct-vhost
     runs-on: ubuntu-18.04
     steps:
-      - name: CHECKOUT REPOSITORY
-        uses: actions/checkout@v2
-      - name: CACHE DEPS
-        uses: actions/cache@v1
+      - if: github.ref == 'refs/heads/master'
+        uses: actions/download-artifact@v2
         with:
-          path: deps
-          key: otp-22.3_git-${{ github.sha }}_deps
+          name: rabbit-rabbitmq-deps.mk
       - name: FORMAT GIT REF
+        if: github.ref == 'refs/heads/master'
         # https://github.community/t5/GitHub-Actions/How-can-I-set-an-expression-as-an-environment-variable-at/m-p/41804/highlight/true#M4751
         id: ref
         run: |
@@ -5978,6 +6715,6 @@ jobs:
          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
          AWS_REGION: ${{ secrets.AWS_REGION }}
-         FILE: deps/rabbit-rabbitmq-deps.mk
+         FILE: rabbit-rabbitmq-deps.mk
          S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
          S3_KEY: rabbitmq-server/${{ steps.ref.outputs.branch_or_tag_name }}/${{ github.run_id }}/otp-22.3/rabbit-rabbitmq-deps.mk

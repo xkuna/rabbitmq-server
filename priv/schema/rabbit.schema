@@ -1090,6 +1090,12 @@ end}.
 {mapping, "mnesia_table_loading_retry_limit", "rabbit.mnesia_table_loading_retry_limit",
     [{datatype, integer}]}.
 
+{mapping, "message_store_shutdown_timeout", "rabbit.msg_store_shutdown_timeout",
+    [
+        {datatype, integer},
+        {validators, ["non_zero_positive_integer"]}
+    ]}.
+
 %% Size in bytes below which to embed messages in the queue index. See
 %% https://www.rabbitmq.com/persistence-conf.html
 %%
@@ -1666,6 +1672,18 @@ end}.
     end
 }.
 
+{mapping, "raft.data_dir", "ra.data_dir", [
+  {datatype, string}
+]}.
+
+{translation, "ra.data_dir",
+    fun(Conf) ->
+        case cuttlefish:conf_get("raft.data_dir", Conf, undefined) of
+            undefined -> cuttlefish:unset();
+            Val       -> Val
+        end
+    end
+}.
 
 % ===============================
 % Validators
