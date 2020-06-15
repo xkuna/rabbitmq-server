@@ -570,6 +570,8 @@ prioritise_cast(Msg, _Len, _State) ->
     case Msg of
         {confirm,            _MsgSeqNos, _QPid} -> 5;
         {reject_publish,     _MsgSeqNos, _QPid} -> 5;
+        {queue_event, _, {confirm,            _MsgSeqNos, _QPid}} -> 5;
+        {queue_event, _, {reject_publish,     _MsgSeqNos, _QPid}} -> 5;
         _                                       -> 0
     end.
 
@@ -730,18 +732,15 @@ handle_cast({mandatory_received, _MsgSeqNo}, State) ->
     %% NB: don't call noreply/1 since we don't want to send confirms.
     noreply_coalesce(State);
 
-handle_cast({reject_publish, MsgSeqNo, _QPid}, State = #ch{unconfirmed = UC}) ->
-    %% It does not matter which queue rejected the message,
-    %% if any queue did, it should not be confirmed.
-    {MaybeRejected, UC1} = unconfirmed_messages:reject_msg(MsgSeqNo, UC),
-    %% NB: don't call noreply/1 since we don't want to send confirms.
-    case MaybeRejected of
-        not_confirmed ->
-            noreply_coalesce(State#ch{unconfirmed = UC1});
-        {rejected, MX} ->
-            noreply_coalesce(
-              record_rejects([MX], State#ch{unconfirmed = UC1}))
-    end;
+handle_cast({reject_publish, _MsgSeqNo, QPid} = Evt, State) ->
+    %% For backwards compatibility
+    QRef = find_queue_name_from_pid(QPid, State#ch.queue_states),
+    handle_cast({queue_event, QRef, Evt}, State);
+
+handle_cast({confirm, _MsgSeqNo, QPid} = Evt, State) ->
+    %% For backwards compatibility
+    QRef = find_queue_name_from_pid(QPid, State#ch.queue_states),
+    handle_cast({queue_event, QRef, Evt}, State);
 
 handle_cast({queue_event, QRef, Evt},
             #ch{queue_states = QueueStates0} = State0) ->
@@ -762,6 +761,11 @@ handle_cast({queue_event, QRef, Evt},
             noreply_coalesce(
               State2#ch{queue_states = rabbit_queue_type:remove(QRef, QueueStates0)})
     end.
+
+handle_info({ra_event, {Name, _} = From, Evt}, State) ->
+    %% For backwards compatibility
+    QRef = find_queue_name_from_quorum_name(Name, State#ch.queue_states),
+    handle_cast({queue_event, QRef, {From, Evt}}, State);
 
 handle_info({bump_credit, Msg}, State) ->
     %% A rabbit_amqqueue_process is granting credit to our channel. If
@@ -2743,3 +2747,33 @@ handle_queue_actions(Actions, #ch{} = State0) ->
               handle_consuming_queue_down_or_eol(QRef, QRef, S0)
 
       end, State0, Actions).
+
+find_queue_name_from_pid(Pid, QStates) ->
+    Fun = fun(K, _V, undefined) ->
+                  {ok, Q} = rabbit_amqqueue:lookup(K),
+                  Pids = get_queue_pids(Q),
+                  case lists:member(Pid, Pids) of
+                      true ->
+                          K;
+                      false ->
+                          undefined
+                  end
+          end,
+    rabbit_queue_type:fold_state(Fun, undefined, QStates).
+
+get_queue_pids(Q) when ?amqqueue_is_quorum(Q) ->
+    [amqqueue:get_leader(Q)];
+get_queue_pids(Q) ->
+    [amqqueue:get_pid(Q) | amqqueue:get_slave_pids(Q)].
+
+find_queue_name_from_quorum_name(Name, QStates) ->
+    Fun = fun(K, _V, undefined) ->
+                  {ok, Q} = rabbit_amqqueue:lookup(K),
+                  case amqqueue:get_pid(Q) of
+                      {Name, _} ->
+                          amqqueue:get_name(Q);
+                      _ ->
+                          undefined
+                  end
+          end,
+    rabbit_queue_type:fold_state(Fun, undefined, QStates).
