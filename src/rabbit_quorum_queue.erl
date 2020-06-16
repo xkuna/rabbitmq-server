@@ -448,8 +448,11 @@ recover(_Vhost, Queues) ->
     lists:foldl(
       fun (Q0, {R0, F0}) ->
          {Name, _} = amqqueue:get_pid(Q0),
+         QName = amqqueue:get_name(Q0),
          Nodes = get_nodes(Q0),
-         Res = case ra:restart_server({Name, node()}) of
+         Formatter = {?MODULE, format_ra_event, [QName]},
+         Res = case ra:restart_server({Name, node()},
+                                      #{ra_event_formatter => Formatter}) of
                    ok ->
                        % queue was restarted, good
                        ok;
@@ -665,7 +668,7 @@ consume(Q, Spec, QState0) when ?amqqueue_is_quorum(Q) ->
             emit_consumer_created(ChPid, ConsumerTag, ExclusiveConsume,
                     AckRequired, QName, Prefetch,
                     Args, none, ActingUser),
-            {ok, QState};
+            {ok, QState, []};
         {error, Error} ->
             Error;
         {timeout, _} ->
