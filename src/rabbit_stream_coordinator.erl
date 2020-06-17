@@ -404,6 +404,9 @@ state_enter(leader, #?MODULE{streams = Streams}) ->
                           [{monitor, process, Pid} || Pid <- maps:get(replica_pids, Conf)] ++
                           Acc
               end, [], Streams);
+state_enter(recover, _) ->
+    put('$rabbit_vm_category', ?MODULE),
+    [];
 state_enter(_, _) ->
     [].
 
