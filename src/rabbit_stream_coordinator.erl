@@ -179,7 +179,8 @@ init(_Conf) ->
              monitors = #{}}.
 
 apply(_Meta, {subscribe, #{stream_id := StreamId, subscriber := Subscriber}},
-      #?MODULE{streams = Streams} = State) ->
+      #?MODULE{streams = Streams,
+               monitors = Monitors0} = State) ->
     case maps:get(StreamId, Streams, undefined) of
         undefined ->
             {State, {error, not_found}, []};
@@ -190,12 +191,16 @@ apply(_Meta, {subscribe, #{stream_id := StreamId, subscriber := Subscriber}},
                     {State, ok, []};
                 false ->
                     SState = SState0#{subscribers  => [Subscriber | Subs]},
-                    {State#?MODULE{streams = Streams#{StreamId => SState}},
-                     ok, [leader_event(Conf, Subscriber)]}
+                    Monitors = maybe_update_subscribers(Subscriber, StreamId, Monitors0),
+                    {State#?MODULE{streams = Streams#{StreamId => SState},
+                                   monitors = Monitors},
+                     ok, [{monitor, process, Subscriber},
+                          leader_event(Conf, Subscriber)]}
             end
     end;
 apply(_Meta, {unsubscribe, #{stream_id := StreamId, subscriber := Subscriber}},
-      #?MODULE{streams = Streams} = State) ->
+      #?MODULE{streams = Streams,
+               monitors = Monitors0} = State) ->
     case maps:get(StreamId, Streams, undefined) of
         undefined ->
             {State, ok, []};
@@ -204,8 +209,15 @@ apply(_Meta, {unsubscribe, #{stream_id := StreamId, subscriber := Subscriber}},
                 false ->
                     {State, ok, []};
                 true ->
+                    Monitors = case maps:get(Subscriber, Monitors0) of
+                                   {[StreamId], subscriber} ->
+                                       maps:remove(Subscriber, Monitors0);
+                                   {SubscribedTo, subscriber} ->
+                                       maps:put(Subscriber, {lists:delete(StreamId, SubscribedTo), subscriber})
+                               end,
                     SState = SState0#{subscribers  => lists:delete(Subscriber, Subs)},
-                    {State#?MODULE{streams = Streams#{StreamId => SState}}, ok, []}
+                    {State#?MODULE{streams = Streams#{StreamId => SState},
+                                   monitors = Monitors}, ok, []}
             end
     end;
 apply(Meta, {_, #{from := From}} = Cmd, State) ->
@@ -329,6 +341,10 @@ apply(_Meta, {delete_cluster_reply, StreamId},  #?MODULE{streams = Streams} = St
 apply(_Meta, {down, Pid, _Reason} = Cmd, #?MODULE{streams = Streams,
                                                   monitors = Monitors0} = State) ->
     case maps:get(Pid, Monitors0, undefined) of
+        {SubscribedTo, subscriber} ->
+            Streams1 = remove_subscriber(Pid, SubscribedTo, Streams),
+            {State#?MODULE{monitors = maps:remove(Pid, Monitors0),
+                           streams = Streams1}, ok, []};
         {StreamId, Role} ->
             Monitors = maps:remove(Pid, Monitors0),
             case maps:get(StreamId, Streams, undefined) of
@@ -755,3 +771,23 @@ leader_event(#{reference := Ref, leader_pid := Pid}, Subscriber) ->
         false ->
             {send_msg, Subscriber, {leader_down, Ref, Pid}}
     end.
+
+maybe_update_subscribers(Subscriber, StreamId, Monitors) ->
+    case Monitors of
+        #{Subscriber := {Streams, subscriber}} ->
+            maps:put(Subscriber, {[StreamId | Streams], subscriber}, Monitors);
+        _ ->
+            maps:put(Subscriber, {[StreamId], subscriber}, Monitors)
+    end.
+
+remove_subscriber(Pid, SubscribedTo, Streams) ->
+    lists:foldl(
+      fun(StreamId, Acc) ->
+              case maps:get(StreamId, Acc, undefined) of
+                  undefined ->
+                      Acc;
+                  #{subscribers := Subs} = SState0 ->
+                      SState = SState0#{subscribers => lists:delete(Pid, Subs)},
+                      Streams#{StreamId => SState}
+              end
+      end, Streams, SubscribedTo).
