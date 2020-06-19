@@ -379,7 +379,9 @@ apply(_Meta, {down, Pid, _Reason} = Cmd, #?MODULE{streams = Streams,
                         follower ->
                             case rabbit_misc:is_process_alive(maps:get(leader_pid, Conf0)) of
                                 true ->
-                                    SState = update_stream_state(undefined, replica_restart,
+                                    SState = update_stream_state(undefined,
+                                                                 replica_restart,
+                                                                 Pid,
                                                                  SState0),
                                     rabbit_log:debug("rabbit_stream_coordinator: ~p replica on node ~p is down, entering phase_start_replica", [StreamId, node(Pid)]),
                                     {State#?MODULE{monitors = Monitors,
@@ -493,8 +495,9 @@ add_members(Members, [Node | Nodes]) ->
                 _ ->
                     add_members(Members, Nodes)
             end;
-        _ ->
-            %% TODO log failure?
+        Error ->
+            rabbit_log:warning("Stream coordinator failed to start on node ~p : ~p",
+                               [Node, Error]),
             add_members(Members, Nodes)
     end.
 
@@ -547,9 +550,12 @@ handle_aux(leader, _, {down, Pid, Reason}, {Monitors0, Coordinator}, LogState, _
 handle_aux(_, _, _, AuxState, LogState, _) ->
     {no_reply, AuxState, LogState}.
 
-reply_and_run_pending(StreamId, Reply, #?MODULE{streams = Streams} = State) ->
+reply_and_run_pending(StreamId, Reply, #?MODULE{streams = Streams,
+                                                monitors = Monitors0} = State) ->
     #{reply_to := From,
-      pending := Pending0} = SState0 = maps:get(StreamId, Streams),
+      pending := Pending0,
+      state := StreamState,
+      conf := #{replica_nodes := ReplicaNodes}} = SState0 = maps:get(StreamId, Streams),
     Pending = case Pending0 of
                   [] ->
                       [];
@@ -557,12 +563,29 @@ reply_and_run_pending(StreamId, Reply, #?MODULE{streams = Streams} = State) ->
                       ra:pipeline_command({?MODULE, node()}, Cmd),
                       Cmds
               end,
+    {Monitors, Actions} =
+        case {Reply, StreamState} of
+            {{error, _}, replica_restart} ->
+                %% We need to ensure we keep trying to start the replica until it
+                %% eventually succeeds
+                Pid = maps:get(state_info, SState0),
+                case lists:member(node(Pid), ReplicaNodes) of
+                    true ->
+                        {maps:put(Pid, {StreamId, follower}, Monitors0),
+                         [{monitor, process, Pid}]};
+                    false ->
+                        {Monitors0, []}
+                end;
+            _ ->
+                {Monitors0, []}
+        end,
     SState = maps:put(pending, Pending, clear_stream_state(SState0)),
     ReplyActions = case From of
-                       undefined -> [];
-                       _ -> [{reply, From, {wrap_reply, Reply}}]
+                       undefined -> Actions;
+                       _ -> [{reply, From, {wrap_reply, Reply}} | Actions]
                    end,
-    {State#?MODULE{streams = Streams#{StreamId => SState}}, ok, ReplyActions}.
+    {State#?MODULE{streams = Streams#{StreamId => SState},
+                   monitors = Monitors}, ok, ReplyActions}.
 
 add_pending_cmd(From, {CmdName, CmdMap}, #{pending := Pending0} = StreamState) ->
     %% Remove from pending the leader election and automatic replica restart when
@@ -587,6 +610,13 @@ update_stream_state(From, State, StreamState) ->
     StreamState#{reply_to => From,
                  state => State}.
 
+update_stream_state(From, State, Info, StreamState) ->
+    StreamState#{reply_to => From,
+                 state => State,
+                 %% Some additional info might be needed if we have to retry a phase,
+                 %% like in a failure to automatically restart a follower
+                 state_info => Info}.
+
 phase_start_replica(Node, #{replica_nodes := Replicas0,
                             replica_pids := ReplicaPids0,
                             name := StreamId} = Conf0) ->
@@ -599,25 +629,38 @@ phase_start_replica(Node, #{replica_nodes := Replicas0,
               %% to provide a log message instead as it's 'expected'. We could try to
               %% verify first that the leader is alive, but there would still be potential
               %% for a race condition in here.
-              case osiris_replica:start(Node, Conf0) of
-                  {ok, Pid} ->
-                      ReplicaPids = [Pid | lists:filter(fun(P) ->
-                                                                node(P) =/= Node
-                                                        end, ReplicaPids0)],
-                      Replicas = [Node | Replicas0],
-                      Conf = Conf0#{replica_pids => ReplicaPids,
-                                    replica_nodes => Replicas},
-                      ra:pipeline_command({?MODULE, node()},
-                                          {start_replica_reply, Pid, Conf});
-                  {error, already_present} ->
-                      ra:pipeline_command({?MODULE, node()}, {phase_finished, StreamId, ok});
-                  {error, {already_started, _}} ->
-                      ra:pipeline_command({?MODULE, node()}, {phase_finished, StreamId, ok});
-                  {error, Reason} ->
-                      %% TODO what to do?
+              try
+                  case osiris_replica:start(Node, Conf0) of
+                      {ok, Pid} ->
+                          ReplicaPids = [Pid | lists:filter(fun(P) ->
+                                                                    node(P) =/= Node
+                                                            end, ReplicaPids0)],
+                          Replicas = [Node | Replicas0],
+                          Conf = Conf0#{replica_pids => ReplicaPids,
+                                        replica_nodes => Replicas},
+                          ra:pipeline_command({?MODULE, node()},
+                                              {start_replica_reply, Pid, Conf});
+                      {error, already_present} ->
+                          ra:pipeline_command({?MODULE, node()}, {phase_finished, StreamId, ok});
+                      {error, {already_started, _}} ->
+                          ra:pipeline_command({?MODULE, node()}, {phase_finished, StreamId, ok});
+                      {error, Reason} = Error ->
+                          rabbit_log:warning("Error while starting replica for ~p : ~p",
+                                             [maps:get(name, Conf0), Reason]),
+                          %% TODO adaptative timeout, it should increase the longer the
+                          %% other node is failing/unavailable. It might never come back
+                          timer:sleep(1000),
+                          ra:pipeline_command({?MODULE, node()},
+                                              {phase_finished, StreamId, Error})
+                  end
+              catch _:{{nodedown, _} = R, _} = E->
                       rabbit_log:warning("Error while starting replica for ~p : ~p",
-                                         [maps:get(name, Conf0), Reason]),
-                      ok
+                                         [maps:get(name, Conf0), E]),
+                      %% TODO adaptative timeout, it should increase the longer the
+                      %% other node is failing/unavailable. It might never come back
+                      timer:sleep(1000),
+                      ra:pipeline_command({?MODULE, node()},
+                                          {phase_finished, StreamId, {error, R}})
               end
       end).
 
