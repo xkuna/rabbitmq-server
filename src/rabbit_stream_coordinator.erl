@@ -148,8 +148,6 @@ ensure_coordinator_started() ->
                 [] ->
                     start_coordinator_cluster();
                 _ ->
-                    %% TODO
-                    %% The coordinator process should take care of adding the new rabbit node
                     OtherNodes
             end;
         ok ->
@@ -278,13 +276,14 @@ apply(_Meta, {start_replica_reply, Pid, #{name := StreamId} = Conf},
     {State#?MODULE{streams = Streams#{StreamId => SState},
                    monitors = Monitors0#{Pid => {StreamId, follower}}}, ok,
      [{monitor, process, Pid}, {aux, {phase, StreamId, phase_repair_mnesia, [update, Conf]}}]};
-apply(#{from := From}, {delete_replica, #{stream_id := StreamId, node := Node}},
-      #?MODULE{streams = Streams,
+apply(#{from := From}, {delete_replica, #{stream_id := StreamId, node := Node}} = Cmd,
+      #?MODULE{streams = Streams0,
                monitors = Monitors0} = State) ->
-    case maps:get(StreamId, Streams, undefined) of
+    case maps:get(StreamId, Streams0, undefined) of
         undefined ->
             {State, '$ra_no_reply', [{reply, From, {wrap_reply, {error, not_found}}}]};
-        #{conf := Conf0} = SState0 ->
+        #{conf := Conf0,
+          state := running} = SState0 ->
             Replicas0 = maps:get(replica_nodes, Conf0),
             ReplicaPids0 = maps:get(replica_pids, Conf0),
             case lists:member(Node, Replicas0) of
@@ -299,11 +298,14 @@ apply(#{from := From}, {delete_replica, #{stream_id := StreamId, node := Node}},
                     SState = update_stream_state(From, delete_replica, SState0#{conf => Conf0}),
                     rabbit_log:debug("rabbit_stream_coordinator: ~p entering phase_delete_replica on node ~p", [StreamId, Node]),
                     {State#?MODULE{monitors = maps:remove(Pid, Monitors0),
-                                   streams = Streams#{StreamId => SState}},
+                                   streams = Streams0#{StreamId => SState}},
                      '$ra_no_reply',
                      [{demonitor, process, Pid},
                       {aux, {phase, StreamId, phase_delete_replica, [Node, Conf]}}]}
-            end
+            end;
+        SState0 ->
+            Streams = maps:put(StreamId, add_pending_cmd(From, Cmd, SState0), Streams0),
+            {State#?MODULE{streams = Streams}, '$ra_no_reply', []}
     end;
 apply(#{from := From}, {delete_cluster, #{stream_id := StreamId,
                                           acting_user := ActingUser}} = Cmd,
@@ -325,7 +327,6 @@ apply(#{from := From}, {delete_cluster, #{stream_id := StreamId,
                            streams = Streams0#{StreamId => SState}}, '$ra_no_reply',
              Demonitors ++ [{aux, {phase, StreamId, phase_delete_cluster, [Conf, ActingUser]}}]};
         SState0 ->
-            %% TODO remove from pending the leader election or automatic restart!
             Streams = maps:put(StreamId, add_pending_cmd(From, Cmd, SState0), Streams0),
             {State#?MODULE{streams = Streams}, '$ra_no_reply', []}
     end;
@@ -563,7 +564,19 @@ reply_and_run_pending(StreamId, Reply, #?MODULE{streams = Streams} = State) ->
                    end,
     {State#?MODULE{streams = Streams#{StreamId => SState}}, ok, ReplyActions}.
 
-add_pending_cmd(From, {CmdName, CmdMap}, #{pending := Pending} = StreamState) ->
+add_pending_cmd(From, {CmdName, CmdMap}, #{pending := Pending0} = StreamState) ->
+    %% Remove from pending the leader election and automatic replica restart when
+    %% the command is delete_cluster
+    Pending = case CmdName of
+                  delete_cluster ->
+                      lists:filter(fun({down, _, _}) ->
+                                           false;
+                                      (_) ->
+                                           true
+                                   end, Pending0);
+                  _ ->
+                      Pending0
+              end,
     maps:put(pending, [{CmdName, maps:put(from, From, CmdMap)} | Pending], StreamState).
 
 clear_stream_state(StreamState) ->
