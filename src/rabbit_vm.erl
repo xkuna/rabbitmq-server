@@ -64,7 +64,7 @@ memory() ->
 
     OtherProc = Processes
         - ConnsReader - ConnsWriter - ConnsChannel - ConnsOther
-        - Qs - QsSlave - Qqs - Ssqs - Srqs - SCoor, MsgIndexProc - Plugins
+        - Qs - QsSlave - Qqs - Ssqs - Srqs - SCoor - MsgIndexProc - Plugins
         - MgmtDbProc - MetricsProc,
 
     [
@@ -249,7 +249,7 @@ ranch_server_sups() ->
 with(Sups, With) -> [{Sup, With} || Sup <- Sups].
 
 distinguishers() -> with(queue_sups(), fun queue_type/1) ++
-                    with(conn_sups(), fun conn_type/1),
+                    with(conn_sups(), fun conn_type/1) ++
                     with(quorum_sups(), fun ra_type/1).
 
 distinguished_interesting_sups() ->
