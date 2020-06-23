@@ -196,6 +196,7 @@ message_id_large_string(_Config) ->
                             ]},
                  Props),
     ok.
+
 %% Utility
 
 test_amqp091_roundtrip(Props, Payload) ->
