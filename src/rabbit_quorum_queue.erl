@@ -19,6 +19,7 @@
 -behaviour(rabbit_queue_type).
 
 -export([init/1,
+         close/1,
          update/2,
          handle_event/2]).
 -export([is_recoverable/1, recover/2, stop/1, delete/4, delete_immediately/2]).
@@ -113,6 +114,10 @@ init(Q) when ?is_amqqueue(Q) ->
     rabbit_fifo_client:init(QName, Servers, SoftLimit,
                             fun() -> credit_flow:block(Name) end,
                             fun() -> credit_flow:unblock(Name), ok end).
+
+-spec close(rabbit_fifo_client:state()) -> ok.
+close(_State) ->
+    ok.
 
 -spec update(amqqueue:amqqueue(), rabbit_fifo_client:state()) ->
     rabbit_fifo_client:state().

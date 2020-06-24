@@ -23,6 +23,7 @@
          policy_changed/1,
          stat/1,
          init/1,
+         close/1,
          update/2,
          consume/3,
          cancel/5,
@@ -140,6 +141,10 @@ init(Q) when ?amqqueue_is_classic(Q) ->
     % rabbit_log:info("classic init ~w", [QName]),
     #?STATE{pid = amqqueue:get_pid(Q),
             qref = QName}.
+
+-spec close(state()) -> ok.
+close(_State) ->
+    ok.
 
 -spec update(amqqueue:amqqueue(), state()) -> state().
 update(Q, #?STATE{pid = Pid} = State) when ?amqqueue_is_classic(Q) ->

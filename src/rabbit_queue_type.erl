@@ -4,6 +4,7 @@
 
 -export([
          init/0,
+         close/1,
          discover/1,
          default/0,
          is_enabled/1,
@@ -136,6 +137,8 @@
 %% stateful
 %% intitialise and return a queue type specific session context
 -callback init(amqqueue:amqqueue()) -> queue_state().
+
+-callback close(queue_state()) -> ok.
 %% update the queue type state from amqqrecord
 -callback update(amqqueue:amqqueue(), queue_state()) -> queue_state().
 
@@ -299,6 +302,15 @@ i_down(K, _Q, _DownReason) ->
 -spec init() -> state().
 init() ->
     #?STATE{}.
+
+-spec close(state()) -> ok.
+close(#?STATE{ctxs = Contexts}) ->
+    _ = maps:map(
+          fun (_, #ctx{module = Mod,
+                       state = S}) ->
+                  ok = Mod:close(S)
+          end, Contexts),
+    ok.
 
 -spec new(amqqueue:amqqueue(), state()) -> state().
 new(Q, State) when ?is_amqqueue(Q) ->
@@ -484,7 +496,7 @@ with(QRef, Fun, Ctxs) ->
     {Res, set_ctx(QRef, Ctx#ctx{state = State}, Ctxs)}.
 
 
-get_ctx(Q, #?STATE{ctxs =  Contexts}) when ?is_amqqueue(Q) ->
+get_ctx(Q, #?STATE{ctxs = Contexts}) when ?is_amqqueue(Q) ->
     Ref = qref(Q),
     case Contexts of
         #{Ref := #ctx{module = Mod,

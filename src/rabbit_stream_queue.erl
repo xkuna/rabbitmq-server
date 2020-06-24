@@ -33,6 +33,7 @@
          dequeue/4,
          info/2,
          init/1,
+         close/1,
          update/2,
          state_info/1,
          stat/1]).
@@ -397,6 +398,12 @@ init(Q) when ?is_amqqueue(Q) ->
     #stream_client{name = amqqueue:get_name(Q),
                    leader = Leader,
                    soft_limit = SoftLimit}.
+
+close(#stream_client{readers = Readers}) ->
+    _ = maps:map(fun (_, #stream{log = Log}) ->
+                         osiris_log:close(Log)
+                 end, Readers),
+    ok.
 
 update(_, State) ->
     State.
