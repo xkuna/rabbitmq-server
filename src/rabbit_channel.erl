@@ -851,7 +851,7 @@ handle_post_hibernate(State0) ->
 terminate(_Reason,
           State = #ch{cfg = #conf{user = #user{username = Username}},
                       queue_states = QueueCtxs}) ->
-    _ = rabbit_queue_types:close(QueueCtxs),
+    _ = rabbit_queue_type:close(QueueCtxs),
     {_Res, _State1} = notify_queues(State),
     pg_local:leave(rabbit_channels, self()),
     rabbit_event:if_enabled(State, #ch.stats_timer,
