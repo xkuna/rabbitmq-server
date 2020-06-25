@@ -92,7 +92,8 @@ all_tests() ->
 init_per_suite(Config0) ->
     rabbit_ct_helpers:log_environment(),
     Config = rabbit_ct_helpers:merge_app_env(
-               Config0, {rabbit, [{stream_tick_interval, 1000}]}),
+               Config0, {rabbit, [{stream_tick_interval, 1000},
+                                  {log, [{file, [{level, debug}]}]}]}),
     rabbit_ct_helpers:run_setup_steps(Config).
 
 end_per_suite(Config) ->
