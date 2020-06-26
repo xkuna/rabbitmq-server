@@ -226,7 +226,11 @@ apply(#{from := From}, {start_cluster, #{queue := Q}}, #?MODULE{streams = Stream
         true ->
             {State, '$ra_no_reply', [{reply, From, {wrap_reply, {error, already_started}}}]};
         false ->
+            Phase = phase_start_cluster,
+            PhaseArgs = [Q],
             SState = #{state => start_cluster,
+                       phase => Phase,
+                       phase_args => PhaseArgs,
                        conf => Conf,
                        reply_to => From,
                        pending_cmds => [],
@@ -234,24 +238,28 @@ apply(#{from := From}, {start_cluster, #{queue := Q}}, #?MODULE{streams = Stream
                        subscribers => []},
             rabbit_log:debug("rabbit_stream_coordinator: ~p entering phase_start_cluster", [StreamId]),
             {State#?MODULE{streams = maps:put(StreamId, SState, Streams)}, '$ra_no_reply', 
-             [{aux, {phase, StreamId, phase_start_cluster, [Q]}}]}
+             [{aux, {phase, StreamId, Phase, PhaseArgs}}]}
     end;
 apply(_Meta, {start_cluster_reply, Q}, #?MODULE{streams = Streams,
                                                 monitors = Monitors0} = State) ->
     #{name := StreamId,
       leader_pid := LeaderPid,
       replica_pids := ReplicaPids} = Conf = amqqueue:get_type_state(Q),
-    SState = maps:put(phase, phase_repair_mnesia,
-                      maps:put(conf, Conf, maps:get(StreamId, Streams))),
+    SState0 = maps:get(StreamId, Streams),
+    Phase = phase_repair_mnesia,
+    PhaseArgs = [new, Q],
+    SState = SState0#{conf => Conf,
+                      phase => Phase,
+                      phase_args => PhaseArgs},
     Monitors = lists:foldl(fun(Pid, M) ->
                                    maps:put(Pid, {StreamId, follower}, M)
                            end, maps:put(LeaderPid, {StreamId, leader}, Monitors0), ReplicaPids),
     MonitorActions = [{monitor, process, Pid} || Pid <- ReplicaPids ++ [LeaderPid]],
-    rabbit_log:debug("rabbit_stream_coordinator: ~p entering phase_repair_mnesia "
-                     "after start_cluster_reply", [StreamId]),
+    rabbit_log:debug("rabbit_stream_coordinator: ~p entering ~p "
+                     "after start_cluster_reply", [StreamId, Phase]),
     {State#?MODULE{streams = maps:put(StreamId, SState, Streams),
                    monitors = Monitors}, ok,
-     MonitorActions ++ [{aux, {phase, StreamId, phase_repair_mnesia, [new, Q]}}]};
+     MonitorActions ++ [{aux, {phase, StreamId, Phase, PhaseArgs}}]};
 apply(_Meta, {start_replica_failed, StreamId, Node, Retries, Reply},
       #?MODULE{streams = Streams0} = State) ->
     rabbit_log:debug("rabbit_stream_coordinator: ~p start replica failed", [StreamId]),
@@ -283,24 +291,30 @@ apply(#{from := From}, {start_replica, #{stream_id := StreamId, node := Node,
             end;
         #{conf := Conf,
           state := running} = SState0 ->
-            SState = update_stream_state(From, start_replica, SState0),
-            rabbit_log:debug("rabbit_stream_coordinator: ~p entering phase_start_replica on node ~p", [StreamId, Node]),
+            Phase = phase_start_replica,
+            PhaseArgs = [Node, Conf, Retries],
+            SState = update_stream_state(From, start_replica, Phase, PhaseArgs, SState0),
+            rabbit_log:debug("rabbit_stream_coordinator: ~p entering ~p on node ~p",
+                             [StreamId, Phase, Node]),
             {State#?MODULE{streams = Streams0#{StreamId => SState}}, '$ra_no_reply',
-             [{aux, {phase, StreamId, phase_start_replica, [Node, Conf, Retries]}}]};
+             [{aux, {phase, StreamId, Phase, PhaseArgs}}]};
         SState0 ->
             Streams = maps:put(StreamId, add_pending_cmd(From, Cmd, SState0), Streams0),
             {State#?MODULE{streams = Streams}, '$ra_no_reply', []}
     end;
 apply(_Meta, {start_replica_reply, Pid, #{name := StreamId} = Conf},
       #?MODULE{streams = Streams, monitors = Monitors0} = State) ->
-    rabbit_log:debug("rabbit_stream_coordinator: ~p entering phase_repair_mnesia after start replica", [StreamId]),
+    Phase = phase_repair_mnesia,
+    PhaseArgs = [update, Conf],
+    rabbit_log:debug("rabbit_stream_coordinator: ~p entering ~p after start replica", [StreamId, Phase]),
     #{pending_replicas := Pending} = SState0 = maps:get(StreamId, Streams),
     SState = SState0#{conf => Conf,
-                      phase => phase_repair_mnesia,
+                      phase => Phase,
+                      phase_args => PhaseArgs,
                       pending_replicas => lists:delete(node(Pid), Pending)},
     {State#?MODULE{streams = Streams#{StreamId => SState},
                    monitors = Monitors0#{Pid => {StreamId, follower}}}, ok,
-     [{monitor, process, Pid}, {aux, {phase, StreamId, phase_repair_mnesia, [update, Conf]}}]};
+     [{monitor, process, Pid}, {aux, {phase, StreamId, Phase, PhaseArgs}}]};
 apply(#{from := From}, {delete_replica, #{stream_id := StreamId, node := Node}} = Cmd,
       #?MODULE{streams = Streams0,
                monitors = Monitors0} = State) ->
@@ -322,15 +336,18 @@ apply(#{from := From}, {delete_replica, #{stream_id := StreamId, node := Node}} 
                     Pending = lists:delete(Node, Pending0),
                     Conf = Conf0#{replica_pids => ReplicaPids,
                                   replica_nodes => Replicas},
+                    Phase = phase_delete_replica,
+                    PhaseArgs = [Node, Conf],
                     SState = update_stream_state(From, delete_replica,
+                                                 Phase, PhaseArgs,
                                                  SState0#{conf => Conf0,
                                                           pending_replicas => Pending}),
-                    rabbit_log:debug("rabbit_stream_coordinator: ~p entering phase_delete_replica on node ~p", [StreamId, Node]),
+                    rabbit_log:debug("rabbit_stream_coordinator: ~p entering ~p on node ~p", [StreamId, Phase, Node]),
                     {State#?MODULE{monitors = maps:remove(Pid, Monitors0),
                                    streams = Streams0#{StreamId => SState}},
                      '$ra_no_reply',
                      [{demonitor, process, Pid},
-                      {aux, {phase, StreamId, phase_delete_replica, [Node, Conf]}}]}
+                      {aux, {phase, StreamId, Phase, PhaseArgs}}]}
             end;
         SState0 ->
             Streams = maps:put(StreamId, add_pending_cmd(From, Cmd, SState0), Streams0),
@@ -349,12 +366,15 @@ apply(#{from := From}, {delete_cluster, #{stream_id := StreamId,
             Monitors = lists:foldl(fun(Pid, M) ->
                                            maps:remove(Pid, M)
                                    end, Monitors0, ReplicaPids ++ [LeaderPid]),
-            SState = update_stream_state(From, delete_cluster, SState0),
+            Phase = phase_delete_cluster,
+            PhaseArgs = [Conf, ActingUser],
+            SState = update_stream_state(From, delete_cluster, Phase, PhaseArgs, SState0),
             Demonitors = [{demonitor, process, Pid} || Pid <- [LeaderPid | ReplicaPids]],
-            rabbit_log:debug("rabbit_stream_coordinator: ~p entering phase_delete_cluster", [StreamId]),
+            rabbit_log:debug("rabbit_stream_coordinator: ~p entering ~p",
+                             [StreamId, Phase]),
             {State#?MODULE{monitors = Monitors,
                            streams = Streams0#{StreamId => SState}}, '$ra_no_reply',
-             Demonitors ++ [{aux, {phase, StreamId, phase_delete_cluster, [Conf, ActingUser]}}]};
+             Demonitors ++ [{aux, {phase, StreamId, Phase, PhaseArgs}}]};
         SState0 ->
             Streams = maps:put(StreamId, add_pending_cmd(From, Cmd, SState0), Streams0),
             {State#?MODULE{streams = Streams}, '$ra_no_reply', []}
@@ -399,22 +419,27 @@ apply(_Meta, {down, Pid, _Reason} = Cmd, #?MODULE{streams = Streams,
                     case Role of
                         leader ->
                             rabbit_log:info("rabbit_stream_coordinator: ~p leader is down, starting election", [StreamId]),
-                            SState = update_stream_state(undefined, leader_election, SState0),
+                            Phase = phase_stop_replicas,
+                            PhaseArgs = [Conf0],
+                            SState = update_stream_state(undefined, leader_election, Phase, PhaseArgs, SState0),
                             Events = emit_leader_down_events(Ref, Pid, Subs),
-                            rabbit_log:debug("rabbit_stream_coordinator: ~p entering phase_stop_replicas", [StreamId]),
+                            rabbit_log:debug("rabbit_stream_coordinator: ~p entering ~p", [StreamId, Phase]),
                             {State#?MODULE{monitors = Monitors,
                                            streams = Streams#{StreamId => SState}},
-                             ok, Events ++ [{aux, {phase, StreamId, phase_stop_replicas, [Conf0]}}]};
+                             ok, Events ++ [{aux, {phase, StreamId, Phase, PhaseArgs}}]};
                         follower ->
                             case rabbit_misc:is_process_alive(maps:get(leader_pid, Conf0)) of
                                 true ->
+                                    Phase = phase_start_replica,
+                                    PhaseArgs = [node(Pid), Conf0, 1],
                                     SState = update_stream_state(undefined,
                                                                  replica_restart,
+                                                                 Phase, PhaseArgs,
                                                                  SState0),
-                                    rabbit_log:debug("rabbit_stream_coordinator: ~p replica on node ~p is down, entering phase_start_replica", [StreamId, node(Pid)]),
+                                    rabbit_log:debug("rabbit_stream_coordinator: ~p replica on node ~p is down, entering ~p", [StreamId, node(Pid), Phase]),
                                     {State#?MODULE{monitors = Monitors,
                                                    streams = Streams#{StreamId => SState}},
-                                     ok, [{aux, {phase, StreamId, phase_start_replica, [node(Pid), Conf0, 1]}}]};
+                                     ok, [{aux, {phase, StreamId, Phase, PhaseArgs}}]};
                                 false ->
                                     SState = SState0#{pending_cmds => [Cmd | Pending0]},
                                     {State#?MODULE{streams = Streams#{StreamId => SState}}, ok, []}
@@ -439,48 +464,79 @@ apply(_Meta, {start_leader_election, StreamId, NewEpoch, Offsets},
     Conf = Conf0#{epoch => NewEpoch,
                   leader_node => NewLeader,
                   replica_nodes => lists:delete(NewLeader, Replicas ++ [Leader])},
-    SState = add_pending_cmd(
-               undefined,
-               {start_replica, #{stream_id => StreamId, node => Leader,
-                                 retries => 1}},
-               SState0#{conf => Conf,
-                        pending_replicas => add_pending_replica(Leader, Pending)}),
-    rabbit_log:debug("rabbit_stream_coordinator: ~p entering phase_start_new_leader", [StreamId]),
+    Phase = phase_start_new_leader,
+    PhaseArgs = [Conf],
+    SState = case NewLeader of
+                 Leader ->
+                     SState0#{conf => Conf,
+                              phase => Phase,
+                              phase_args => PhaseArgs};
+                 _ ->
+                     %% Leader has changed, we have to ensure that the replica on that
+                     %% node is eventually restarted
+                     add_pending_cmd(
+                       undefined,
+                       {start_replica, #{stream_id => StreamId, node => Leader,
+                                         retries => 1}},
+                       SState0#{conf => Conf,
+                                phase => Phase,
+                                phase_args => PhaseArgs,
+                                pending_replicas => add_pending_replica(Leader, Pending)})
+             end,
+    rabbit_log:debug("rabbit_stream_coordinator: ~p entering phase_start_new_leader",
+                     [StreamId]),
     {State#?MODULE{streams = Streams#{StreamId => SState}}, ok,
-     [{aux, {phase, StreamId, phase_start_new_leader, [Conf]}}]};
+     [{aux, {phase, StreamId, Phase, PhaseArgs}}]};
 apply(_Meta, {leader_elected, #{name := StreamId,
                                   leader_pid := LeaderPid} = Conf},
       #?MODULE{streams = Streams, monitors = Monitors} = State) ->
     rabbit_log:info("rabbit_stream_coordinator: ~p leader elected", [StreamId]),
     #{subscribers := Subs} = SState0 = maps:get(StreamId, Streams),
-    SState = SState0#{conf => Conf},
+    Phase = phase_repair_mnesia,
+    PhaseArgs = [update, Conf],
+    SState = SState0#{conf => Conf,
+                      phase => Phase,
+                      phase_args => PhaseArgs},
     Events = emit_leader_up_events(maps:get(reference, Conf), LeaderPid, Subs),
-    rabbit_log:debug("rabbit_stream_coordinator: ~p entering phase_repair_mnesia after "
-                     "leader election", [StreamId]),
+    rabbit_log:debug("rabbit_stream_coordinator: ~p entering ~p after "
+                     "leader election", [StreamId, Phase]),
     {State#?MODULE{streams = Streams#{StreamId => SState},
                    monitors = maps:put(LeaderPid, {StreamId, leader}, Monitors)}, ok,
      Events ++ [{monitor, process, LeaderPid},
-                {aux, {phase, StreamId, phase_repair_mnesia, [update, Conf]}}]};
+                {aux, {phase, StreamId, Phase, PhaseArgs}}]};
 apply(_Meta, {replicas_stopped, StreamId}, #?MODULE{streams = Streams} = State) ->
     #{conf := Conf} = maps:get(StreamId, Streams),
+    SState0 = maps:get(StreamId, Streams),
+    Phase = phase_check_quorum,
+    PhaseArgs = [Conf],
+    SState = SState0#{phase => Phase,
+                      phase_args => PhaseArgs},
     rabbit_log:info("rabbit_stream_coordinator: ~p all replicas have been stopped, "
                     "checking quorum available", [StreamId]),
-    {State, ok, [{aux, {phase, StreamId, phase_check_quorum, [Conf]}}]};
+    {State#?MODULE{streams = Streams#{StreamId => SState}}, ok,
+     [{aux, {phase, StreamId, Phase, PhaseArgs}}]};
 apply(_Meta, {stream_updated, #{name := StreamId} = Conf}, #?MODULE{streams = Streams} = State) ->
     SState0 = maps:get(StreamId, Streams),
-    SState = SState0#{conf => Conf},
-    rabbit_log:debug("rabbit_stream_coordinator: ~p entering phase_repair_mnesia after"
-                     " stream_updated", [StreamId]),
+    Phase = phase_repair_mnesia,
+    PhaseArgs = [update, Conf],
+    SState = SState0#{conf => Conf,
+                      phase => Phase,
+                      phase_args => PhaseArgs},
+    rabbit_log:debug("rabbit_stream_coordinator: ~p entering ~p after"
+                     " stream_updated", [StreamId, Phase]),
     {State#?MODULE{streams = Streams#{StreamId => SState}}, ok,
-     [{aux, {phase, StreamId, phase_repair_mnesia, [update, Conf]}}]};
+     [{aux, {phase, StreamId, Phase, PhaseArgs}}]};
 apply(Meta, {_, #{from := From}} = Cmd, State) ->
     ?MODULE:apply(Meta#{from => From}, Cmd, State).
 
 state_enter(leader, #?MODULE{streams = Streams}) ->
-    %% TODO start replicas for pending ones
     maps:fold(fun(_, #{conf := Conf,
-                       pending_replicas := Pending}, Acc) ->
-                      pipeline_restart_replica_cmds(maps:get(name, Conf), Pending) ++
+                       pending_replicas := Pending,
+                       state := State,
+                       phase := Phase,
+                       phase_args := PhaseArgs}, Acc) ->
+                      restart_aux_phase(State, Phase, PhaseArgs, maps:get(name, Conf)) ++
+                          pipeline_restart_replica_cmds(maps:get(name, Conf), Pending) ++
                           [{monitor, process, maps:get(leader_pid, Conf)}] ++
                           [{monitor, process, Pid} || Pid <- maps:get(replica_pids, Conf)] ++
                           Acc
@@ -490,6 +546,11 @@ state_enter(recover, _) ->
     [];
 state_enter(_, _) ->
     [].
+
+restart_aux_phase(running, _, _, _) ->
+    [];
+restart_aux_phase(_State, Phase, PhaseArgs, StreamId) ->
+    [{aux, {phase, StreamId, Phase, PhaseArgs}}].
 
 pipeline_restart_replica_cmds(StreamId, Pending) ->
     [{mod_call, timer, apply_after,
@@ -636,9 +697,11 @@ clear_stream_state(StreamState) ->
     StreamState#{reply_to => undefined,
                  state => running}.
 
-update_stream_state(From, State, StreamState) ->
+update_stream_state(From, State, Phase, PhaseArgs, StreamState) ->
     StreamState#{reply_to => From,
-                 state => State}.
+                 state => State,
+                 phase => Phase,
+                 phase_args => PhaseArgs}.
 
 phase_start_replica(Node, #{replica_nodes := Replicas0,
                             replica_pids := ReplicaPids0,
@@ -724,7 +787,7 @@ phase_check_quorum(#{name := StreamId,
                      replica_nodes := Nodes} = Conf) ->
     spawn(fun() ->
                   Offsets = find_replica_offsets(Conf),
-                  case is_quorum(length(Nodes), length(Offsets)) of
+                  case is_quorum(length(Nodes) + 1, length(Offsets)) of
                       true ->
                           ra:pipeline_command({?MODULE, node()},
                                               {start_leader_election, StreamId, Epoch + 1, Offsets});

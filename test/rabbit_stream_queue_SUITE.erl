@@ -38,7 +38,7 @@ all() ->
 
 groups() ->
     [
-     {single_node, [], all_tests()},
+     {single_node, [], [restart_single_node] ++ all_tests()},
      {cluster_size_2, [], all_tests()},
      {cluster_size_3, [], all_tests() ++
           [delete_replica,
@@ -547,6 +547,24 @@ publish_confirm(Config) ->
     publish(Ch, Q),
     amqp_channel:wait_for_confirms(Ch, 5000),
     quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]).
+
+restart_single_node(Config) ->
+    [Server] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+    publish(Ch, Q),
+    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]),
+
+    rabbit_control_helper:command(stop_app, Server),
+    rabbit_control_helper:command(start_app, Server),
+
+    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]),
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
+    publish(Ch1, Q),
+    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"2">>, <<"2">>, <<"0">>]]).
 
 recover(Config) ->
     [Server | _] = Servers = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
