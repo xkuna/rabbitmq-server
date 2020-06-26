@@ -67,8 +67,7 @@
                         readers = #{} :: #{term() => #stream{}}
                        }).
 
--import(rabbit_queue_type_util, [args_policy_lookup/3,
-                                 qname_to_internal_name/1]).
+-import(rabbit_queue_type_util, [args_policy_lookup/3]).
 
 -type client() :: #stream_client{}.
 
