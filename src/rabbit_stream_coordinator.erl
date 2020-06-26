@@ -740,12 +740,16 @@ find_replica_offsets(#{replica_nodes := Nodes,
       fun(Node, Acc) ->
               try
                   %% osiris_log:overview/1 needs the directory - last item of the list
-                  %% TODO ensure we dont' match the rpc:call response with {error, sthing}
-                  case rpc:call(Node, ?MODULE, log_overview, [Conf]) of
-                      {badrpc, nodedown} ->
+                  case rpc:call(Node, rabbit, is_running, []) of
+                      false ->
                           Acc;
-                      {_Range, Offsets} ->
-                          [{Node, select_highest_offset(Offsets)} | Acc]
+                      true ->
+                          case rpc:call(Node, ?MODULE, log_overview, [Conf]) of
+                              {badrpc, nodedown} ->
+                                  Acc;
+                              {_Range, Offsets} ->
+                                  [{Node, select_highest_offset(Offsets)} | Acc]
+                          end
                   end
               catch
                   _:_ ->
