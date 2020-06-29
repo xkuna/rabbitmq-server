@@ -265,7 +265,7 @@ apply(_Meta, {start_replica_failed, StreamId, Node, Retries, Reply},
     rabbit_log:debug("rabbit_stream_coordinator: ~p start replica failed", [StreamId]),
     #{pending_replicas := Pending} = SState = maps:get(StreamId, Streams0, undefined),
     Streams = Streams0#{StreamId => SState#{pending_replicas =>
-                                                add_pending_replica(Node, Pending)}},
+                                                add_unique(Node, Pending)}},
     reply_and_run_pending(
       StreamId, Reply, State#?MODULE{streams = Streams},
       [{mod_call, timer, apply_after,
@@ -457,13 +457,15 @@ apply(_Meta, {start_leader_election, StreamId, NewEpoch, Offsets},
     #{conf := Conf0,
       pending_replicas := Pending} = SState0 = maps:get(StreamId, Streams),
     #{leader_node := Leader,
-      replica_nodes := Replicas} = Conf0,
+      replica_nodes := Replicas,
+      replica_pids := ReplicaPids} = Conf0,
     NewLeader = find_max_offset(Offsets),
     rabbit_log:info("rabbit_stream_coordinator: ~p starting new leader on node ~p",
                     [StreamId, NewLeader]),
     Conf = Conf0#{epoch => NewEpoch,
                   leader_node => NewLeader,
-                  replica_nodes => lists:delete(NewLeader, Replicas ++ [Leader])},
+                  replica_nodes => lists:delete(NewLeader, Replicas ++ [Leader]),
+                  replica_pids => delete_replica_pid(NewLeader, ReplicaPids)},
     Phase = phase_start_new_leader,
     PhaseArgs = [Conf],
     SState = case NewLeader of
@@ -481,7 +483,7 @@ apply(_Meta, {start_leader_election, StreamId, NewEpoch, Offsets},
                        SState0#{conf => Conf,
                                 phase => Phase,
                                 phase_args => PhaseArgs,
-                                pending_replicas => add_pending_replica(Leader, Pending)})
+                                pending_replicas => add_unique(Leader, Pending)})
              end,
     rabbit_log:debug("rabbit_stream_coordinator: ~p entering phase_start_new_leader",
                      [StreamId]),
@@ -719,10 +721,8 @@ phase_start_replica(Node, #{replica_nodes := Replicas0,
               try
                   case osiris_replica:start(Node, Conf0) of
                       {ok, Pid} ->
-                          ReplicaPids = [Pid | lists:filter(fun(P) ->
-                                                                    node(P) =/= Node
-                                                            end, ReplicaPids0)],
-                          Replicas = [Node | Replicas0],
+                          ReplicaPids = [Pid | delete_replica_pid(Node, ReplicaPids0)],
+                          Replicas = add_unique(Node, Replicas0),
                           Conf = Conf0#{replica_pids => ReplicaPids,
                                         replica_nodes => Replicas},
                           ra:pipeline_command({?MODULE, node()},
@@ -952,10 +952,13 @@ remove_subscriber(Pid, SubscribedTo, Streams) ->
               end
       end, Streams, SubscribedTo).
 
-add_pending_replica(Node, Nodes) ->
+add_unique(Node, Nodes) ->
     case lists:member(Node, Nodes) of
         true ->
             Nodes;
         _ ->
             [Node | Nodes]
     end.
+
+delete_replica_pid(Node, ReplicaPids) ->
+    lists:filter(fun(P) -> node(P) =/= Node end, ReplicaPids).
