@@ -328,7 +328,8 @@ apply(#{from := From}, {delete_replica, #{stream_id := StreamId, node := Node}} 
             ReplicaPids0 = maps:get(replica_pids, Conf0),
             case lists:member(Node, Replicas0) of
                 false ->
-                    {State, '$ra_no_reply', [{reply, From, {wrap_reply, ok}}]};
+                    {run_pending(StreamId, State), '$ra_no_reply',
+                     [{reply, From, {wrap_reply, ok}}]};
                 true ->
                     [Pid] = lists:filter(fun(P) -> node(P) == Node end, ReplicaPids0),
                     ReplicaPids = lists:delete(Pid, ReplicaPids0),
@@ -441,12 +442,12 @@ apply(_Meta, {down, Pid, _Reason} = Cmd, #?MODULE{streams = Streams,
                                                    streams = Streams#{StreamId => SState}},
                                      ok, [{aux, {phase, StreamId, Phase, PhaseArgs}}]};
                                 false ->
-                                    SState = SState0#{pending_cmds => [Cmd | Pending0]},
-                                    {State#?MODULE{streams = Streams#{StreamId => SState}}, ok, []}
+                                    SState = SState0#{pending_cmds => Pending0 ++ [Cmd]},
+                                    {run_pending(StreamId, State#?MODULE{streams = Streams#{StreamId => SState}}), ok, []}
                             end
                     end;
                 #{pending_cmds := Pending0} = SState0 ->
-                    SState = SState0#{pending_cmds => [Cmd | Pending0]},
+                    SState = SState0#{pending_cmds => Pending0 ++ [Cmd]},
                     {State#?MODULE{streams = Streams#{StreamId => SState}}, ok, []}
             end;
         undefined ->
@@ -678,6 +679,18 @@ reply_and_run_pending(StreamId, Reply, #?MODULE{streams = Streams} = State,
                        _ -> [{reply, From, {wrap_reply, Reply}} | Actions]
                    end,
     {State#?MODULE{streams = Streams#{StreamId => SState}}, ok, ReplyActions}.
+
+run_pending(StreamId, #?MODULE{streams = Streams} = State) ->
+    #{pending_cmds := Pending0} = SState0 = maps:get(StreamId, Streams),
+    Pending = case Pending0 of
+                  [] ->
+                      [];
+                  [Cmd | Cmds] ->
+                      ra:pipeline_command({?MODULE, node()}, Cmd),
+                      Cmds
+              end,
+    SState = maps:put(pending_cmds, Pending, SState0),
+    State#?MODULE{streams = Streams#{StreamId => SState}}.
 
 add_pending_cmd(From, {CmdName, CmdMap}, #{pending_cmds := Pending0} = StreamState) ->
     %% Remove from pending the leader election and automatic replica restart when
