@@ -697,7 +697,9 @@ add_pending_cmd(From, {CmdName, CmdMap}, #{pending_cmds := Pending0} = StreamSta
 
 clear_stream_state(StreamState) ->
     StreamState#{reply_to => undefined,
-                 state => running}.
+                 state => running,
+                 phase => undefined,
+                 phase_args => undefined}.
 
 update_stream_state(From, State, Phase, PhaseArgs, StreamState) ->
     StreamState#{reply_to => From,
