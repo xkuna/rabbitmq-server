@@ -57,7 +57,12 @@ handle_info(tick, #state{timeout = Timeout} = State) ->
                       rabbit_core_metrics:queue_stats(QName, COffs, 0, COffs, 0),
                       Infos = try
                                   %% TODO complete stats!
-                                  rabbit_stream_queue:info(QName, [state, leader, members])
+                                  case rabbit_amqqueue:lookup(QName) of
+                                      {ok, Q} ->
+                                          rabbit_stream_queue:info(Q, [state, leader, members, online]);
+                                      _ ->
+                                          []
+                                  end
                               catch
                                   _:_ ->
                                       %% It's possible that the writer has died but

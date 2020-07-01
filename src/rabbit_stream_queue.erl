@@ -358,6 +358,10 @@ i(leader, Q) when ?is_amqqueue(Q) ->
 i(members, Q) when ?is_amqqueue(Q) ->
     #{replica_nodes := Nodes} = amqqueue:get_type_state(Q),
     Nodes;
+i(online, Q) ->
+    #{replica_pids := ReplicaPids,
+      leader_pid := LeaderPid} = amqqueue:get_type_state(Q),
+    [node(P) || P <- ReplicaPids ++ [LeaderPid], rabbit_misc:is_process_alive(P)];
 i(state, Q) when ?is_amqqueue(Q) ->
     %% TODO the coordinator should answer this, I guess??
     running;
