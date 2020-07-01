@@ -224,7 +224,7 @@ apply(#{from := From}, {start_cluster, #{queue := Q}}, #?MODULE{streams = Stream
     #{name := StreamId} = Conf = amqqueue:get_type_state(Q),
     case maps:is_key(StreamId, Streams) of
         true ->
-            {State, '$ra_no_reply', [{reply, From, {wrap_reply, {error, already_started}}}]};
+            {State, '$ra_no_reply', wrap_reply(From, {error, already_started})};
         false ->
             Phase = phase_start_cluster,
             PhaseArgs = [Q],
@@ -263,21 +263,25 @@ apply(_Meta, {start_cluster_reply, Q}, #?MODULE{streams = Streams,
 apply(_Meta, {start_replica_failed, StreamId, Node, Retries, Reply},
       #?MODULE{streams = Streams0} = State) ->
     rabbit_log:debug("rabbit_stream_coordinator: ~p start replica failed", [StreamId]),
-    #{pending_replicas := Pending} = SState = maps:get(StreamId, Streams0, undefined),
-    Streams = Streams0#{StreamId => SState#{pending_replicas =>
-                                                add_unique(Node, Pending)}},
+    #{pending_replicas := Pending,
+      reply_to := From} = SState = maps:get(StreamId, Streams0),
+    Streams = Streams0#{StreamId => clear_stream_state(SState#{pending_replicas =>
+                                                                   add_unique(Node, Pending)})},
     reply_and_run_pending(
-      StreamId, Reply, State#?MODULE{streams = Streams},
+      From, StreamId, ok, Reply,
       [{mod_call, timer, apply_after,
         [?RESTART_TIMEOUT * Retries, ra, pipeline_command,
          [{?MODULE, node()},
           {start_replica, #{stream_id => StreamId,
                             node => Node,
                             from => undefined,
-                            retries => Retries + 1}}]]}]);
-apply(_Meta, {phase_finished, StreamId, Reply}, State) ->
+                            retries => Retries + 1}}]]}],
+      State#?MODULE{streams = Streams});
+apply(_Meta, {phase_finished, StreamId, Reply}, #?MODULE{streams = Streams0} = State) ->
     rabbit_log:debug("rabbit_stream_coordinator: ~p phase finished", [StreamId]),
-    reply_and_run_pending(StreamId, Reply, State, []);
+    #{reply_to := From} = SState = maps:get(StreamId, Streams0),
+    Streams = Streams0#{StreamId => clear_stream_state(SState)},
+    reply_and_run_pending(From, StreamId, ok, Reply, [], State#?MODULE{streams = Streams});
 apply(#{from := From}, {start_replica, #{stream_id := StreamId, node := Node,
                                          retries := Retries}} = Cmd,
       #?MODULE{streams = Streams0} = State) ->
@@ -287,7 +291,7 @@ apply(#{from := From}, {start_replica, #{stream_id := StreamId, node := Node,
                 undefined ->
                     {State, ok, []};
                 _ ->
-                    {State, '$ra_no_reply', [{reply, From, {wrap_reply, {error, not_found}}}]}
+                    {State, '$ra_no_reply', wrap_reply(From, {error, not_found})}
             end;
         #{conf := Conf,
           state := running} = SState0 ->
@@ -320,7 +324,7 @@ apply(#{from := From}, {delete_replica, #{stream_id := StreamId, node := Node}} 
                monitors = Monitors0} = State) ->
     case maps:get(StreamId, Streams0, undefined) of
         undefined ->
-            {State, '$ra_no_reply', [{reply, From, {wrap_reply, {error, not_found}}}]};
+            {State, '$ra_no_reply', wrap_reply(From, {error, not_found})};
         #{conf := Conf0,
           state := running,
           pending_replicas := Pending0} = SState0 ->
@@ -328,8 +332,7 @@ apply(#{from := From}, {delete_replica, #{stream_id := StreamId, node := Node}} 
             ReplicaPids0 = maps:get(replica_pids, Conf0),
             case lists:member(Node, Replicas0) of
                 false ->
-                    {run_pending(StreamId, State), '$ra_no_reply',
-                     [{reply, From, {wrap_reply, ok}}]};
+                    reply_and_run_pending(From, StreamId, '$ra_no_reply', ok, [], State);
                 true ->
                     [Pid] = lists:filter(fun(P) -> node(P) == Node end, ReplicaPids0),
                     ReplicaPids = lists:delete(Pid, ReplicaPids0),
@@ -359,7 +362,7 @@ apply(#{from := From}, {delete_cluster, #{stream_id := StreamId,
       #?MODULE{streams = Streams0, monitors = Monitors0} = State) ->
     case maps:get(StreamId, Streams0, undefined) of
         undefined ->
-            {State, '$ra_no_reply', [{reply, From, {wrap_reply, {ok, 0}}}]};
+            {State, '$ra_no_reply', wrap_reply(From, {ok, 0})};
         #{conf := Conf,
           state := running} = SState0 ->
             ReplicaPids = maps:get(replica_pids, Conf),
@@ -380,25 +383,23 @@ apply(#{from := From}, {delete_cluster, #{stream_id := StreamId,
             Streams = maps:put(StreamId, add_pending_cmd(From, Cmd, SState0), Streams0),
             {State#?MODULE{streams = Streams}, '$ra_no_reply', []}
     end;
-apply(_Meta, {delete_cluster_reply, StreamId},  #?MODULE{streams = Streams} = State0) ->
-    State = State0#?MODULE{streams = maps:remove(StreamId, Streams)},
+apply(_Meta, {delete_cluster_reply, StreamId}, #?MODULE{streams = Streams,
+                                                        monitors = Monitors0} = State0) ->
+    #{reply_to := From,
+      subscribers := Subs,
+      pending_cmds := Pending,
+      conf := #{reference := Ref,
+                replica_pids := ReplicaPids,
+                leader_pid := LeaderPid}} = maps:get(StreamId, Streams),
+    Events = emit_queue_deleted_events(Ref, Subs),
+    Monitors = lists:foldl(fun(Pid, Acc) ->
+                                   maps:remove(Pid, Acc)
+                           end, Monitors0, ReplicaPids ++ [LeaderPid]),
+    State = State0#?MODULE{streams = maps:remove(StreamId, Streams),
+                           monitors = Monitors},
     rabbit_log:debug("rabbit_stream_coordinator: ~p finished delete_cluster_reply",
                      [StreamId]),
-    case maps:get(StreamId, Streams) of
-        #{reply_to := From,
-          pending_cmds := [],
-          subscribers := Subs,
-          conf := #{reference := Ref}} ->
-            Events = emit_queue_deleted_events(Ref, Subs),
-            {State, ok, [{reply, From, {wrap_reply, {ok, 0}}}] ++ Events};
-        #{reply_to := From,
-          pending_cmds := Pending,
-          subscribers := Subs,
-          conf := #{reference := Ref}} ->
-            Events = emit_queue_deleted_events(Ref, Subs),
-            [ra:pipeline_command({?MODULE, node()}, Cmd) || Cmd <- Pending],
-            {State, ok, [{reply, From, {wrap_reply, {ok, 0}}}] ++ Events}
-    end;
+    {State, ok, [{aux, {pipeline, Pending}}] ++ wrap_reply(From, {ok, 0}) ++ Events};
 apply(_Meta, {down, Pid, _Reason} = Cmd, #?MODULE{streams = Streams,
                                                   monitors = Monitors0} = State) ->
     case maps:get(Pid, Monitors0, undefined) of
@@ -443,7 +444,7 @@ apply(_Meta, {down, Pid, _Reason} = Cmd, #?MODULE{streams = Streams,
                                      ok, [{aux, {phase, StreamId, Phase, PhaseArgs}}]};
                                 false ->
                                     SState = SState0#{pending_cmds => Pending0 ++ [Cmd]},
-                                    {run_pending(StreamId, State#?MODULE{streams = Streams#{StreamId => SState}}), ok, []}
+                                    reply_and_run_pending(undefined, StreamId, ok, ok, [], State#?MODULE{streams = Streams#{StreamId => SState}})
                             end
                     end;
                 #{pending_cmds := Pending0} = SState0 ->
@@ -659,38 +660,26 @@ handle_aux(leader, _, {down, Pid, Reason}, {Monitors0, Coordinator}, LogState, _
             Monitors = maps:put(NewPid, Cmd, maps:remove(Pid, Monitors0)),
             {no_reply, {Monitors, Coordinator}, LogState}
     end;
+handle_aux(leader, _, {pipeline, Cmds}, AuxState, LogState, _) ->
+    [ra:pipeline_command({?MODULE, node()}, Cmd) || Cmd <- Cmds],
+    {no_reply, AuxState, LogState};
 handle_aux(_, _, _, AuxState, LogState, _) ->
     {no_reply, AuxState, LogState}.
 
-reply_and_run_pending(StreamId, Reply, #?MODULE{streams = Streams} = State,
-                      Actions) ->
-    #{reply_to := From,
-      pending_cmds := Pending0} = SState0 = maps:get(StreamId, Streams),
-    Pending = case Pending0 of
-                  [] ->
-                      [];
-                  [Cmd | Cmds] ->
-                      ra:pipeline_command({?MODULE, node()}, Cmd),
-                      Cmds
+reply_and_run_pending(From, StreamId, Reply, WrapReply, Actions0, #?MODULE{streams = Streams} = State) ->
+    #{pending_cmds := Pending} = SState0 = maps:get(StreamId, Streams),
+    AuxActions = [{aux, {pipeline, Pending}}],
+    SState = maps:put(pending_cmds, [], SState0),
+    Actions = case From of
+                  undefined ->
+                      AuxActions ++ Actions0;
+                  _ ->
+                      wrap_reply(From, WrapReply) ++ AuxActions ++ Actions0
               end,
-    SState = maps:put(pending_cmds, Pending, clear_stream_state(SState0)),
-    ReplyActions = case From of
-                       undefined -> Actions;
-                       _ -> [{reply, From, {wrap_reply, Reply}} | Actions]
-                   end,
-    {State#?MODULE{streams = Streams#{StreamId => SState}}, ok, ReplyActions}.
+    {State#?MODULE{streams = Streams#{StreamId => SState}}, Reply, Actions}.
 
-run_pending(StreamId, #?MODULE{streams = Streams} = State) ->
-    #{pending_cmds := Pending0} = SState0 = maps:get(StreamId, Streams),
-    Pending = case Pending0 of
-                  [] ->
-                      [];
-                  [Cmd | Cmds] ->
-                      ra:pipeline_command({?MODULE, node()}, Cmd),
-                      Cmds
-              end,
-    SState = maps:put(pending_cmds, Pending, SState0),
-    State#?MODULE{streams = Streams#{StreamId => SState}}.
+wrap_reply(From, Reply) ->
+    [{reply, From, {wrap_reply, Reply}}].
 
 add_pending_cmd(From, {CmdName, CmdMap}, #{pending_cmds := Pending0} = StreamState) ->
     %% Remove from pending the leader election and automatic replica restart when
