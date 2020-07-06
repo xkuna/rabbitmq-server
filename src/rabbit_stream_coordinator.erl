@@ -269,13 +269,12 @@ apply(_Meta, {start_replica_failed, StreamId, Node, Retries, Reply},
                                                                    add_unique(Node, Pending)})},
     reply_and_run_pending(
       From, StreamId, ok, Reply,
-      [{mod_call, timer, apply_after,
-        [?RESTART_TIMEOUT * Retries, ra, pipeline_command,
-         [{?MODULE, node()},
-          {start_replica, #{stream_id => StreamId,
-                            node => Node,
-                            from => undefined,
-                            retries => Retries + 1}}]]}],
+      [{timer, {pipeline,
+                [{start_replica, #{stream_id => StreamId,
+                                   node => Node,
+                                   from => undefined,
+                                   retries => Retries + 1}}]},
+        ?RESTART_TIMEOUT * Retries}],
       State#?MODULE{streams = Streams});
 apply(_Meta, {phase_finished, StreamId, Reply}, #?MODULE{streams = Streams0} = State) ->
     rabbit_log:debug("rabbit_stream_coordinator: ~p phase finished", [StreamId]),
@@ -399,7 +398,8 @@ apply(_Meta, {delete_cluster_reply, StreamId}, #?MODULE{streams = Streams,
                            monitors = Monitors},
     rabbit_log:debug("rabbit_stream_coordinator: ~p finished delete_cluster_reply",
                      [StreamId]),
-    {State, ok, [{aux, {pipeline, Pending}}] ++ wrap_reply(From, {ok, 0}) ++ Events};
+    Actions = [{ra, pipeline_command, [{?MODULE, node()}, Cmd]} || Cmd <- Pending],
+    {State, ok, Actions ++ wrap_reply(From, {ok, 0}) ++ Events};
 apply(_Meta, {down, Pid, _Reason} = Cmd, #?MODULE{streams = Streams,
                                                   monitors = Monitors0} = State) ->
     case maps:get(Pid, Monitors0, undefined) of
@@ -530,6 +530,9 @@ apply(_Meta, {stream_updated, #{name := StreamId} = Conf}, #?MODULE{streams = St
                      " stream_updated", [StreamId, Phase]),
     {State#?MODULE{streams = Streams#{StreamId => SState}}, ok,
      [{aux, {phase, StreamId, Phase, PhaseArgs}}]};
+apply(_, {timeout, {pipeline, Cmds}}, State) ->
+    Actions = [{mod_call, ra, pipeline_command, [{?MODULE, node()}, Cmd]} || Cmd <- Cmds],
+    {State, ok, Actions};
 apply(Meta, {_, #{from := From}} = Cmd, State) ->
     ?MODULE:apply(Meta#{from => From}, Cmd, State).
 
@@ -557,13 +560,11 @@ restart_aux_phase(_State, Phase, PhaseArgs, StreamId) ->
     [{aux, {phase, StreamId, Phase, PhaseArgs}}].
 
 pipeline_restart_replica_cmds(StreamId, Pending) ->
-    [{mod_call, timer, apply_after,
-      [?RESTART_TIMEOUT, ra, pipeline_command,
-       [{?MODULE, node()},
-        {start_replica, #{stream_id => StreamId,
-                          node => Node,
-                          from => undefined,
-                          retries => 1}}]]} || Node <- Pending].
+    [{timer, {pipeline, [{start_replica, #{stream_id => StreamId,
+                                           node => Node,
+                                           from => undefined,
+                                           retries => 1}}
+                         || Node <- Pending]}, ?RESTART_TIMEOUT}].
 
 tick(_Ts, _State) ->
     [{aux, maybe_resize_coordinator_cluster}].
@@ -660,15 +661,13 @@ handle_aux(leader, _, {down, Pid, Reason}, {Monitors0, Coordinator}, LogState, _
             Monitors = maps:put(NewPid, Cmd, maps:remove(Pid, Monitors0)),
             {no_reply, {Monitors, Coordinator}, LogState}
     end;
-handle_aux(leader, _, {pipeline, Cmds}, AuxState, LogState, _) ->
-    [ra:pipeline_command({?MODULE, node()}, Cmd) || Cmd <- Cmds],
-    {no_reply, AuxState, LogState};
 handle_aux(_, _, _, AuxState, LogState, _) ->
     {no_reply, AuxState, LogState}.
 
 reply_and_run_pending(From, StreamId, Reply, WrapReply, Actions0, #?MODULE{streams = Streams} = State) ->
     #{pending_cmds := Pending} = SState0 = maps:get(StreamId, Streams),
-    AuxActions = [{aux, {pipeline, Pending}}],
+    AuxActions = [{mod_call, ra, pipeline_command, [{?MODULE, node()}, Cmd]}
+                  || Cmd <- Pending],
     SState = maps:put(pending_cmds, [], SState0),
     Actions = case From of
                   undefined ->
