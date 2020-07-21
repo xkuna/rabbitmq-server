@@ -1,16 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -41,7 +32,7 @@ description() ->
 queue_master_location(Q) when ?is_amqqueue(Q) ->
     Cluster = rabbit_queue_master_location_misc:all_nodes(Q),
     QueueNames = rabbit_amqqueue:list_names(),
-    MastersPerNode = lists:foldl(
+    MastersPerNode0 = lists:foldl(
         fun(#resource{virtual_host = VHost, name = QueueName}, NodeMasters) ->
             case rabbit_queue_master_location_misc:lookup_master(QueueName, VHost) of
                 {ok, Master} when is_atom(Master) ->
@@ -56,16 +47,24 @@ queue_master_location(Q) when ?is_amqqueue(Q) ->
         end,
         maps:from_list([{N, 0} || N <- Cluster]),
         QueueNames),
+    
+    MastersPerNode = maps:filter(fun (Node, _N) ->
+                                    not rabbit_maintenance:is_being_drained_local_read(Node)
+                                 end, MastersPerNode0),
 
-    {MinNode, _NMasters} = maps:fold(
-        fun(Node, NMasters, init) ->
-            {Node, NMasters};
-        (Node, NMasters, {MinNode, MinMasters}) ->
-            case NMasters < MinMasters of
-                true  -> {Node, NMasters};
-                false -> {MinNode, MinMasters}
-            end
-        end,
-        init,
-        MastersPerNode),
-    {ok, MinNode}.
+    case map_size(MastersPerNode) > 0 of
+        true ->
+            {MinNode, _NMasters} = maps:fold(
+                fun(Node, NMasters, init) ->
+                    {Node, NMasters};
+                (Node, NMasters, {MinNode, MinMasters}) ->
+                    case NMasters < MinMasters of
+                        true  -> {Node, NMasters};
+                        false -> {MinNode, MinMasters}
+                    end
+                end,
+                init, MastersPerNode),
+            {ok, MinNode};
+        false ->
+            undefined
+    end.

@@ -1,16 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -57,7 +48,7 @@
 -rabbit_upgrade({user_password_hashing, mnesia, [hash_passwords]}).
 -rabbit_upgrade({operator_policies,     mnesia, [slave_pids_pending_shutdown, internal_system_x]}).
 -rabbit_upgrade({vhost_limits,          mnesia, []}).
--rabbit_upgrade({queue_vhost_field,     mnesia, [operator_policies]}).
+-rabbit_upgrade({queue_vhost_field,      mnesia, [operator_policies]}).
 -rabbit_upgrade({topic_permission,      mnesia,  []}).
 -rabbit_upgrade({queue_options,         mnesia, [queue_vhost_field]}).
 -rabbit_upgrade({exchange_options,      mnesia, [operator_policies]}).
@@ -619,6 +610,7 @@ user_password_hashing() ->
       end,
       [username, password_hash, tags, hashing_algorithm]).
 
+-spec topic_permission() -> 'ok'.
 topic_permission() ->
     create(rabbit_topic_permission,
         [{record_name, topic_permission},
@@ -656,6 +648,7 @@ transform(TableName, Fun, FieldList, NewRecordName) ->
     ok.
 
 create(Tab, TabDef) ->
+    rabbit_log:debug("Will create a schema table named '~s'", [Tab]),
     {atomic, ok} = mnesia:create_table(Tab, TabDef),
     ok.
 

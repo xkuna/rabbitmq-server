@@ -1,16 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -26,10 +17,7 @@
 -behaviour(supervisor).
 
 -export([start_link/10]).
-
 -export([init/1]).
-
-%%----------------------------------------------------------------------------
 
 -type mfargs() :: {atom(), atom(), [any()]}.
 
@@ -57,11 +45,16 @@ init({IPAddress, Port, Transport, SocketOpts, ProtoSup, ProtoOpts, OnStartup, On
                       {port, Port} |
                       SocketOpts]
      },
-    {ok, {{one_for_all, 10, 10}, [
-        ranch:child_spec({acceptor, IPAddress, Port},
-            Transport, RanchListenerOpts,
-            ProtoSup, ProtoOpts),
-        {tcp_listener, {tcp_listener, start_link,
-                        [IPAddress, Port,
-                         OnStartup, OnShutdown, Label]},
-         transient, 16#ffffffff, worker, [tcp_listener]}]}}.
+    Flags = #{strategy => one_for_all, intensity => 10, period => 10},
+    OurChildSpec = #{
+        id => tcp_listener,
+        start => {tcp_listener, start_link, [IPAddress, Port, OnStartup, OnShutdown, Label]},
+        restart => transient,
+        shutdown => 16#ffffffff,
+        type => worker,
+        modules => [tcp_listener]
+    },
+    RanchChildSpec = ranch:child_spec(rabbit_networking:ranch_ref(IPAddress, Port),
+        Transport, RanchListenerOpts,
+        ProtoSup, ProtoOpts),
+    {ok, {Flags, [RanchChildSpec, OurChildSpec]}}.

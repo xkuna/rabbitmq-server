@@ -1,16 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2010-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -117,10 +108,10 @@ init_with_existing_bq(Q0, BQ, BQS) when ?is_amqqueue(Q0) ->
         ok = rabbit_misc:execute_mnesia_transaction(Fun),
         {_MNode, SNodes} = rabbit_mirror_queue_misc:suggested_queue_nodes(Q0),
         %% We need synchronous add here (i.e. do not return until the
-        %% slave is running) so that when queue declaration is finished
-        %% all slaves are up; we don't want to end up with unsynced slaves
+        %% mirror is running) so that when queue declaration is finished
+        %% all mirrors are up; we don't want to end up with unsynced mirrors
         %% just by declaring a new queue. But add can't be synchronous all
-        %% the time as it can be called by slaves and that's
+        %% the time as it can be called by mirrors and that's
         %% deadlock-prone.
         rabbit_mirror_queue_misc:add_mirrors(QName, SNodes, sync),
         #state{name                = QName,
@@ -207,9 +198,9 @@ terminate(Reason,
         true  -> %% Remove the whole queue to avoid data loss
                  rabbit_mirror_queue_misc:log_warning(
                    QName, "Stopping all nodes on master shutdown since no "
-                   "synchronised slave is available~n", []),
+                   "synchronised mirror (replica) is available~n", []),
                  stop_all_slaves(Reason, State);
-        false -> %% Just let some other slave take over.
+        false -> %% Just let some other mirror take over.
                  ok
     end,
     State #state { backing_queue_state = BQ:terminate(Reason, BQS) }.
@@ -262,9 +253,9 @@ batch_publish(Publishes, ChPid, Flow,
                       MsgSizes),
     BQS1 = BQ:batch_publish(Publishes2, ChPid, Flow, BQS),
     ensure_monitoring(ChPid, State #state { backing_queue_state = BQS1 }).
-%% [0] When the slave process handles the publish command, it sets the
+%% [0] When the mirror process handles the publish command, it sets the
 %% IsDelivered flag to true, so to avoid iterating over the messages
-%% again at the slave, we do it here.
+%% again at the mirror, we do it here.
 
 publish_delivered(Msg = #basic_message { id = MsgId }, MsgProps,
                   ChPid, Flow, State = #state { gm                  = GM,
@@ -330,7 +321,7 @@ drain_confirmed(State = #state { backing_queue       = BQ,
                       error ->
                           {[MsgId | MsgIdsN], SSN};
                       {ok, published} ->
-                          %% It was published when we were a slave,
+                          %% It was published when we were a mirror,
                           %% and we were promoted before we saw the
                           %% publish from the channel. We still
                           %% haven't seen the channel publish, and
@@ -451,7 +442,7 @@ is_duplicate(Message = #basic_message { id = MsgId },
                               backing_queue_state = BQS,
                               confirmed           = Confirmed }) ->
     %% Here, we need to deal with the possibility that we're about to
-    %% receive a message that we've already seen when we were a slave
+    %% receive a message that we've already seen when we were a mirror
     %% (we received it via gm). Thus if we do receive such message now
     %% via the channel, there may be a confirm waiting to issue for
     %% it.
@@ -464,7 +455,7 @@ is_duplicate(Message = #basic_message { id = MsgId },
             {Result, BQS1} = BQ:is_duplicate(Message, BQS),
             {Result, State #state { backing_queue_state = BQS1 }};
         {ok, published} ->
-            %% It already got published when we were a slave and no
+            %% It already got published when we were a mirror and no
             %% confirmation is waiting. amqqueue_process will have, in
             %% its msg_id_to_channel mapping, the entry for dealing
             %% with the confirm when that comes back in (it's added
@@ -474,16 +465,16 @@ is_duplicate(Message = #basic_message { id = MsgId },
             {{true, drop}, State #state { seen_status = maps:remove(MsgId, SS) }};
         {ok, Disposition}
           when Disposition =:= confirmed
-            %% It got published when we were a slave via gm, and
+            %% It got published when we were a mirror via gm, and
             %% confirmed some time after that (maybe even after
             %% promotion), but before we received the publish from the
             %% channel, so couldn't previously know what the
-            %% msg_seq_no was (and thus confirm as a slave). So we
+            %% msg_seq_no was (and thus confirm as a mirror). So we
             %% need to confirm now. As above, amqqueue_process will
             %% have the entry for the msg_id_to_channel mapping added
             %% immediately after calling is_duplicate/2.
           orelse Disposition =:= discarded ->
-            %% Message was discarded while we were a slave. Confirm now.
+            %% Message was discarded while we were a mirror. Confirm now.
             %% As above, amqqueue_process will have the entry for the
             %% msg_id_to_channel mapping.
             {{true, drop}, State #state { seen_status = maps:remove(MsgId, SS),

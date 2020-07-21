@@ -1,16 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2010-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -194,11 +185,11 @@ handle_set_maximum_since_use() ->
 
 syncer(Ref, Log, MPid, SPids) ->
     [erlang:monitor(process, SPid) || SPid <- SPids],
-    %% We wait for a reply from the slaves so that we know they are in
+    %% We wait for a reply from the mirrors so that we know they are in
     %% a receive block and will thus receive messages we send to them
     %% *without* those messages ending up in their gen_server2 pqueue.
     case await_slaves(Ref, SPids) of
-        []     -> Log("all slaves already synced", []);
+        []     -> Log("all mirrors already synced", []);
         SPids1 -> MPid ! {ready, self()},
                   Log("mirrors ~p to sync", [[node(SPid) || SPid <- SPids1]]),
                   syncer_check_resources(Ref, MPid, SPids1)
@@ -213,8 +204,8 @@ await_slaves(Ref, SPids) ->
                      {'DOWN', _, process, SPid, _} -> false
                  end].
 %% [0] This check is in case there's been a partition which has then
-%% healed in between the master retrieving the slave pids from Mnesia
-%% and sending 'sync_start' over GM. If so there might be slaves on the
+%% healed in between the master retrieving the mirror pids from Mnesia
+%% and sending 'sync_start' over GM. If so there might be mirrors on the
 %% other side of the partition which we can monitor (since they have
 %% rejoined the distributed system with us) but which did not get the
 %% 'sync_start' and so will not reply. We need to act as though they are
@@ -257,7 +248,7 @@ syncer_loop(Ref, MPid, SPids) ->
             SPids1 = wait_for_credit(SPids),
             case SPids1 of
                 [] ->
-                    % Die silently because there are no slaves left.
+                    % Die silently because there are no mirrors left.
                     ok;
                 _  ->
                     broadcast(SPids1, {sync_msgs, Ref, Msgs}),
@@ -265,7 +256,7 @@ syncer_loop(Ref, MPid, SPids) ->
                     syncer_loop(Ref, MPid, SPids1)
             end;
         {cancel, Ref} ->
-            %% We don't tell the slaves we will die - so when we do
+            %% We don't tell the mirrors we will die - so when we do
             %% they interpret that as a failure, which is what we
             %% want.
             ok;
@@ -304,7 +295,7 @@ wait_for_resources(Ref, SPids) ->
             %% Ignore other alerts.
             wait_for_resources(Ref, SPids);
         {cancel, Ref} ->
-            %% We don't tell the slaves we will die - so when we do
+            %% We don't tell the mirrors we will die - so when we do
             %% they interpret that as a failure, which is what we
             %% want.
             cancel;

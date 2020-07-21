@@ -1,25 +1,18 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_table).
 
--export([create/0, create_local_copy/1, wait_for_replicated/1, wait/1, wait/2,
-         force_load/0, is_present/0, is_empty/0, needs_default_data/0,
-         check_schema_integrity/1, clear_ram_only_tables/0, retry_timeout/0,
-         wait_for_replicated/0]).
+-export([
+    create/0, create/2, ensure_local_copies/1, ensure_table_copy/2,
+    wait_for_replicated/1, wait/1, wait/2,
+    force_load/0, is_present/0, is_empty/0, needs_default_data/0,
+    check_schema_integrity/1, clear_ram_only_tables/0, retry_timeout/0,
+    wait_for_replicated/0, exists/1]).
 
 %% for testing purposes
 -export([definitions/0]).
@@ -37,17 +30,28 @@
 -spec create() -> 'ok'.
 
 create() ->
-    lists:foreach(fun ({Tab, TabDef}) ->
-                          TabDef1 = proplists:delete(match, TabDef),
-                          case mnesia:create_table(Tab, TabDef1) of
-                              {atomic, ok} -> ok;
-                              {aborted, Reason} ->
-                                  throw({error, {table_creation_failed,
-                                                 Tab, TabDef1, Reason}})
-                          end
-                  end, definitions()),
+    lists:foreach(
+        fun ({Table, Def}) -> create(Table, Def) end,
+        definitions()),
     ensure_secondary_indexes(),
     ok.
+
+-spec create(mnesia:table(), list()) -> rabbit_types:ok_or_error(any()).
+
+create(TableName, TableDefinition) ->
+    TableDefinition1 = proplists:delete(match, TableDefinition),
+    rabbit_log:debug("Will create a schema database table '~s'", [TableName]),
+    case mnesia:create_table(TableName, TableDefinition1) of
+        {atomic, ok}                              -> ok;
+        {aborted,{already_exists, TableName}}     -> ok;
+        {aborted, {already_exists, TableName, _}} -> ok;
+        {aborted, Reason}                         ->
+            throw({error, {table_creation_failed, TableName, TableDefinition1, Reason}})
+    end.
+
+-spec exists(mnesia:table()) -> boolean().
+exists(Table) ->
+    lists:member(Table, mnesia:system_info(tables)).
 
 %% Sets up secondary indexes in a blank node database.
 ensure_secondary_indexes() ->
@@ -60,19 +64,15 @@ ensure_secondary_index(Table, Field) ->
     {aborted, {already_exists, Table, _}} -> ok
   end.
 
-%% The sequence in which we delete the schema and then the other
-%% tables is important: if we delete the schema first when moving to
-%% RAM mnesia will loudly complain since it doesn't make much sense to
-%% do that. But when moving to disc, we need to move the schema first.
-
--spec create_local_copy('disc' | 'ram') -> 'ok'.
-
-create_local_copy(disc) ->
-    create_local_copy(schema, disc_copies),
-    create_local_copies(disc);
-create_local_copy(ram)  ->
-    create_local_copies(ram),
-    create_local_copy(schema, ram_copies).
+-spec ensure_table_copy(mnesia:table(), node()) -> ok | {error, any()}.
+ensure_table_copy(TableName, Node) ->
+    rabbit_log:debug("Will add a local schema database copy for table '~s'", [TableName]),
+    case mnesia:add_table_copy(TableName, Node, disc_copies) of
+        {atomic, ok}                              -> ok;
+        {aborted,{already_exists, TableName}}     -> ok;
+        {aborted, {already_exists, TableName, _}} -> ok;
+        {aborted, Reason}                         -> {error, Reason}
+    end.
 
 %% This arity only exists for backwards compatibility with certain
 %% plugins. See https://github.com/rabbitmq/rabbitmq-clusterer/issues/19.
@@ -188,6 +188,20 @@ clear_ram_only_tables() ->
               end
       end, names()),
     ok.
+
+%% The sequence in which we delete the schema and then the other
+%% tables is important: if we delete the schema first when moving to
+%% RAM mnesia will loudly complain since it doesn't make much sense to
+%% do that. But when moving to disc, we need to move the schema first.
+
+-spec ensure_local_copies('disc' | 'ram') -> 'ok'.
+
+ensure_local_copies(disc) ->
+    create_local_copy(schema, disc_copies),
+    create_local_copies(disc);
+ensure_local_copies(ram)  ->
+    create_local_copies(ram),
+    create_local_copy(schema, ram_copies).
 
 %%--------------------------------------------------------------------
 %% Internal helpers
@@ -372,7 +386,8 @@ definitions() ->
      {rabbit_queue,
       [{record_name, amqqueue},
        {attributes, amqqueue:fields()},
-       {match, amqqueue:pattern_match_on_name(queue_name_match())}]}]
+       {match, amqqueue:pattern_match_on_name(queue_name_match())}]}
+    ]
         ++ gm:table_definitions()
         ++ mirrored_supervisor:table_definitions().
 

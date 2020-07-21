@@ -1,16 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2010-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -193,12 +184,12 @@ init_it(Self, GM, Node, QName) ->
             master_in_recovery
     end.
 
-%% Pending slaves have been asked to stop by the master, but despite the node
-%% being up these did not answer on the expected timeout. Stop local slaves now.
+%% Pending mirrors have been asked to stop by the master, but despite the node
+%% being up these did not answer on the expected timeout. Stop local mirrors now.
 stop_pending_slaves(QName, Pids) ->
     [begin
          rabbit_mirror_queue_misc:log_warning(
-           QName, "Detected stale HA slave, stopping it: ~p~n", [Pid]),
+           QName, "Detected a non-responsive classic queue mirror, stopping it: ~p~n", [Pid]),
          case erlang:process_info(Pid, dictionary) of
              undefined -> ok;
              {dictionary, Dict} ->
@@ -276,7 +267,7 @@ handle_call({gm_deaths, DeadGMPids}, From,
                     end,
                     %% Since GM is by nature lazy we need to make sure
                     %% there is some traffic when a master dies, to
-                    %% make sure all slaves get informed of the
+                    %% make sure all mirrors get informed of the
                     %% death. That is all process_death does, create
                     %% some traffic.
                     ok = gm:broadcast(GM, process_death),
@@ -307,8 +298,8 @@ handle_cast({gm, Instruction}, State = #state{q = Q0}) when ?is_amqqueue(Q0) ->
                true ->
                    handle_process_result(process_instruction(Instruction, State));
                false ->
-                   %% Potentially a duplicated slave caused by a partial partition,
-                   %% will stop as a new slave could start unaware of our presence
+                   %% Potentially a duplicated mirror caused by a partial partition,
+                   %% will stop as a new mirror could start unaware of our presence
                    {stop, shutdown, State}
            end;
        {error, not_found} ->
@@ -323,7 +314,7 @@ handle_cast({deliver, Delivery = #delivery{sender = Sender, flow = Flow}, true},
     %% the message delivery. See
     %% rabbit_amqqueue_process:handle_ch_down for more info.
     %% If message is rejected by the master, the publish will be nacked
-    %% even if slaves confirm it. No need to check for length here.
+    %% even if mirrors confirm it. No need to check for length here.
     maybe_flow_ack(Sender, Flow),
     noreply(maybe_enqueue_message(Delivery, State));
 
@@ -431,7 +422,7 @@ terminate(Reason, State = #state{backing_queue       = BQ,
 
 %% If the Reason is shutdown, or {shutdown, _}, it is not the queue
 %% being deleted: it's just the node going down. Even though we're a
-%% slave, we have no idea whether or not we'll be the only copy coming
+%% mirror, we have no idea whether or not we'll be the only copy coming
 %% back up. Thus we must assume we will be, and preserve anything we
 %% have on disk.
 terminate_shutdown(Reason, State = #state{backing_queue       = BQ,
@@ -641,7 +632,7 @@ promote_me(From, #state { q                   = Q0,
                           msg_id_status       = MS,
                           known_senders       = KS}) when ?is_amqqueue(Q0) ->
     QName = amqqueue:get_name(Q0),
-    rabbit_mirror_queue_misc:log_info(QName, "Promoting slave ~s to master~n",
+    rabbit_mirror_queue_misc:log_info(QName, "Promoting mirror ~s to master~n",
                                       [rabbit_misc:pid_to_string(self())]),
     Q1 = amqqueue:set_pid(Q0, self()),
     DeathFun = rabbit_mirror_queue_master:sender_death_fun(),
@@ -801,7 +792,7 @@ confirm_sender_death(Pid) ->
     Fun =
         fun (?MODULE, State = #state { known_senders = KS,
                                        gm            = GM }) ->
-                %% We're running still as a slave
+                %% We're running still as a mirror
                 %%
                 %% See comment in local_sender_death/2; we might have
                 %% received a sender_death in the meanwhile so check
@@ -831,7 +822,7 @@ forget_sender(down_from_gm, down_from_gm)        -> false; %% [1]
 forget_sender(down_from_ch, down_from_ch)        -> false;
 forget_sender(Down1, Down2) when Down1 =/= Down2 -> true.
 
-%% [1] If another slave goes through confirm_sender_death/1 before we
+%% [1] If another mirror goes through confirm_sender_death/1 before we
 %% do we can get two GM sender_death messages in a row for the same
 %% channel - don't treat that as anything special.
 

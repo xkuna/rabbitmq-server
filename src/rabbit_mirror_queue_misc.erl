@@ -1,16 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2010-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -91,7 +82,7 @@ remove_from_queue(QueueName, Self, DeadGMPids) ->
                                                 %% GM altered, & if all pids are
                                                 %% perceived as dead, rather do
                                                 %% do nothing here, & trust the
-                                                %% promoted slave to have updated
+                                                %% promoted mirror to have updated
                                                 %% mnesia during the alteration.
                                                 {QPid, SPids};
                                             _  -> promote_slave(Alive)
@@ -133,16 +124,16 @@ remove_from_queue(QueueName, Self, DeadGMPids) ->
                       end
               end
       end).
-%% [1] We still update mnesia here in case the slave that is supposed
+%% [1] We still update mnesia here in case the mirror that is supposed
 %% to become master dies before it does do so, in which case the dead
 %% old master might otherwise never get removed, which in turn might
-%% prevent promotion of another slave (e.g. us).
+%% prevent promotion of another mirror (e.g. us).
 %%
 %% Note however that we do not update the master pid. Otherwise we can
-%% have the situation where a slave updates the mnesia record for a
-%% queue, promoting another slave before that slave realises it has
+%% have the situation where a mirror updates the mnesia record for a
+%% queue, promoting another mirror before that mirror realises it has
 %% become the new master, which is bad because it could then mean the
-%% slave (now master) receives messages it's not ready for (for
+%% mirror (now master) receives messages it's not ready for (for
 %% example, new consumers).
 %%
 %% We set slave_pids to Alive rather than SPids1 since otherwise we'd
@@ -156,7 +147,7 @@ remove_from_queue(QueueName, Self, DeadGMPids) ->
 %% aforementioned restriction on updating the master pid, that pid may
 %% not be present in gm_pids, but only if said master has died.
 
-%% Sometimes a slave dying means we need to start more on other
+%% Sometimes a mirror dying means we need to start more on other
 %% nodes - "exactly" mode can cause this to happen.
 slaves_to_start_on_failure(Q, DeadGMPids) ->
     %% In case Mnesia has not caught up yet, filter out nodes we know
@@ -317,11 +308,11 @@ store_updated_slaves(Q0) when ?is_amqqueue(Q0) ->
 
 %% Recoverable nodes are those which we could promote if the whole
 %% cluster were to suddenly stop and we then lose the master; i.e. all
-%% nodes with running slaves, and all stopped nodes which had running
-%% slaves when they were up.
+%% nodes with running mirrors , and all stopped nodes which had running
+%% mirrors when they were up.
 %%
-%% Therefore we aim here to add new nodes with slaves, and remove
-%% running nodes without slaves, We also try to keep the order
+%% Therefore we aim here to add new nodes with mirrors , and remove
+%% running nodes without mirrors , We also try to keep the order
 %% constant, and similar to the live SPids field (i.e. oldest
 %% first). That's not necessarily optimal if nodes spend a long time
 %% down, but we don't have a good way to predict what the optimal is
@@ -337,10 +328,10 @@ update_recoverable(SPids, RS) ->
 stop_all_slaves(Reason, SPids, QName, GM, WaitTimeout) ->
     PidsMRefs = [{Pid, erlang:monitor(process, Pid)} || Pid <- [GM | SPids]],
     ok = gm:broadcast(GM, {delete_and_terminate, Reason}),
-    %% It's possible that we could be partitioned from some slaves
+    %% It's possible that we could be partitioned from some mirrors
     %% between the lookup and the broadcast, in which case we could
     %% monitor them but they would not have received the GM
-    %% message. So only wait for slaves which are still
+    %% message. So only wait for mirrors which are still
     %% not-partitioned.
     PendingSlavePids = lists:foldl(fun({Pid, MRef}, Acc) ->
         case rabbit_mnesia:on_running_node(Pid) of
@@ -358,16 +349,16 @@ stop_all_slaves(Reason, SPids, QName, GM, WaitTimeout) ->
                 Acc
         end
     end, [], PidsMRefs),
-    %% Normally when we remove a slave another slave or master will
+    %% Normally when we remove a mirror another mirror or master will
     %% notice and update Mnesia. But we just removed them all, and
     %% have stopped listening ourselves. So manually clean up.
     rabbit_misc:execute_mnesia_transaction(fun () ->
         [Q0] = mnesia:read({rabbit_queue, QName}),
         Q1 = amqqueue:set_gm_pids(Q0, []),
         Q2 = amqqueue:set_slave_pids(Q1, []),
-        %% Restarted slaves on running nodes can
+        %% Restarted mirrors on running nodes can
         %% ensure old incarnations are stopped using
-        %% the pending slave pids.
+        %% the pending mirror pids.
         Q3 = amqqueue:set_slave_pids_pending_shutdown(Q2, PendingSlavePids),
         rabbit_mirror_queue_misc:store_updated_slaves(Q3)
     end),
@@ -376,7 +367,7 @@ stop_all_slaves(Reason, SPids, QName, GM, WaitTimeout) ->
 %%----------------------------------------------------------------------------
 
 promote_slave([SPid | SPids]) ->
-    %% The slave pids are maintained in descending order of age, so
+    %% The mirror pids are maintained in descending order of age, so
     %% the one to promote is the oldest.
     {SPid, SPids}.
 
@@ -534,10 +525,10 @@ update_mirrors(Q) when ?is_amqqueue(Q) ->
     OldNodes = [OldMNode | OldSNodes],
     NewNodes = [NewMNode | NewSNodes],
     %% When a mirror dies, remove_from_queue/2 might have to add new
-    %% slaves (in "exactly" mode). It will check mnesia to see which
-    %% slaves there currently are. If drop_mirror/2 is invoked first
+    %% mirrors (in "exactly" mode). It will check mnesia to see which
+    %% mirrors there currently are. If drop_mirror/2 is invoked first
     %% then when we end up in remove_from_queue/2 it will not see the
-    %% slaves that add_mirror/2 will add, and also want to add them
+    %% mirrors that add_mirror/2 will add, and also want to add them
     %% (even though we are not responding to the death of a
     %% mirror). Breakage ensues.
     add_mirrors (QName, NewNodes -- OldNodes, async),
@@ -587,12 +578,12 @@ wait_for_new_master(QName, Destination, N) ->
             end
     end.
 
-%% The arrival of a newly synced slave may cause the master to die if
+%% The arrival of a newly synced mirror may cause the master to die if
 %% the policy does not want the master but it has been kept alive
-%% because there were no synced slaves.
+%% because there were no synced mirrors.
 %%
 %% We don't just call update_mirrors/2 here since that could decide to
-%% start a slave for some other reason, and since we are the slave ATM
+%% start a mirror for some other reason, and since we are the mirror ATM
 %% that allows complicated deadlocks.
 
 -spec maybe_drop_master_after_sync(amqqueue:amqqueue()) -> 'ok'.
@@ -608,7 +599,7 @@ maybe_drop_master_after_sync(Q) when ?is_amqqueue(Q) ->
     end,
     ok.
 %% [0] ASSERTION - if the policy wants the master to change, it has
-%% not just shuffled it into the slaves. All our modes ensure this
+%% not just shuffled it into the mirrors. All our modes ensure this
 %% does not happen, but we should guard against a misbehaving plugin.
 
 %%----------------------------------------------------------------------------

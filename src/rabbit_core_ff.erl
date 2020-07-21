@@ -1,16 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2018-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -19,7 +10,8 @@
 -export([quorum_queue_migration/3,
          stream_queue_migration/3,
          implicit_default_bindings_migration/3,
-         virtual_host_metadata_migration/3]).
+         virtual_host_metadata_migration/3,
+         maintenance_mode_status_migration/3]).
 
 -rabbit_feature_flag(
    {quorum_queue,
@@ -51,6 +43,14 @@
       stability     => stable,
       migration_fun => {?MODULE, virtual_host_metadata_migration}
      }}).
+
+-rabbit_feature_flag(
+    {maintenance_mode_status,
+     #{
+         desc          => "Maintenance mode status",
+         stability     => stable,
+         migration_fun => {?MODULE, maintenance_mode_status_migration}
+      }}).
 
 %% -------------------------------------------------------------------
 %% Quorum queues.
@@ -133,3 +133,20 @@ virtual_host_metadata_migration(_FeatureName, _FeatureProps, enable) ->
     end;
 virtual_host_metadata_migration(_FeatureName, _FeatureProps, is_enabled) ->
     mnesia:table_info(rabbit_vhost, attributes) =:= vhost:fields(vhost_v2).
+
+
+%%
+%% Maintenance mode
+%%
+
+maintenance_mode_status_migration(FeatureName, _FeatureProps, enable) ->
+    TableName = rabbit_maintenance:status_table_name(),
+    rabbit_log:info("Creating table ~s for feature flag `~s`", [TableName, FeatureName]),
+    try
+        _ = rabbit_table:create(TableName, rabbit_maintenance:status_table_definition()),
+        _ = rabbit_table:ensure_table_copy(TableName, node())
+    catch throw:Reason  ->
+        rabbit_log:error("Failed to create maintenance status table: ~p", [Reason])
+    end;
+maintenance_mode_status_migration(_FeatureName, _FeatureProps, is_enabled) ->
+    rabbit_table:exists(rabbit_maintenance:status_table_name()).

@@ -1,16 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -121,7 +112,7 @@ rapid_redeclare(Config) ->
      end || _I <- lists:seq(1, 20)],
     ok.
 
-%% Check that by the time we get a declare-ok back, the slaves are up
+%% Check that by the time we get a declare-ok back, the mirrors are up
 %% and in Mnesia.
 declare_synchrony(Config) ->
     [Rabbit, Hare] = rabbit_ct_broker_helpers:get_node_configs(Config,
@@ -222,7 +213,7 @@ consume_survives(Config,
     Channel2 = rabbit_ct_client_helpers:open_channel(Config, B),
     Channel3 = rabbit_ct_client_helpers:open_channel(Config, C),
 
-    %% declare the queue on the master, mirrored to the two slaves
+    %% declare the queue on the master, mirrored to the two mirrors
     Queue = <<"test">>,
     amqp_channel:call(Channel1, #'queue.declare'{queue       = Queue,
                                                  auto_delete = false}),
@@ -255,7 +246,7 @@ confirms_survive(Config, DeathFun) ->
     Node1Channel = rabbit_ct_client_helpers:open_channel(Config, A),
     Node2Channel = rabbit_ct_client_helpers:open_channel(Config, B),
 
-    %% declare the queue on the master, mirrored to the two slaves
+    %% declare the queue on the master, mirrored to the two mirrors
     Queue = <<"test">>,
     amqp_channel:call(Node1Channel,#'queue.declare'{queue       = Queue,
                                                     auto_delete = false,
@@ -290,7 +281,7 @@ rejects_survive(Config, DeathFun) ->
     Node1Channel = rabbit_ct_client_helpers:open_channel(Config, A),
     Node2Channel = rabbit_ct_client_helpers:open_channel(Config, B),
 
-    %% declare the queue on the master, mirrored to the two slaves
+    %% declare the queue on the master, mirrored to the two mirrors
     XOverflow = ?config(overflow, Config),
     Queue = <<"test_rejects", "_", XOverflow/binary>>,
     amqp_channel:call(Node1Channel,#'queue.declare'{queue       = Queue,

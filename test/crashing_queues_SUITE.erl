@@ -1,16 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -99,7 +90,7 @@ crashing_mirrored(Config) ->
                        #'queue.declare'{queue = QName, durable = true}),
     ok.
 
-test_queue_failure(Node, Ch, RaceConn, MsgCount, SlaveCount, Decl) ->
+test_queue_failure(Node, Ch, RaceConn, MsgCount, FollowerCount, Decl) ->
     #'queue.declare_ok'{queue = QName} = amqp_channel:call(Ch, Decl),
     try
         publish(Ch, QName, transient),
@@ -107,7 +98,7 @@ test_queue_failure(Node, Ch, RaceConn, MsgCount, SlaveCount, Decl) ->
         Racer = spawn_declare_racer(RaceConn, Decl),
         kill_queue(Node, QName),
         assert_message_count(MsgCount, Ch, QName),
-        assert_slave_count(SlaveCount, Node, QName),
+        assert_follower_count(FollowerCount, Node, QName),
         stop_declare_racer(Racer)
     after
         amqp_channel:call(Ch, #'queue.delete'{queue = QName})
@@ -258,7 +249,7 @@ assert_message_count(Count, Ch, QName) ->
         amqp_channel:call(Ch, #'queue.declare'{queue   = QName,
                                                passive = true}).
 
-assert_slave_count(Count, Node, QName) ->
+assert_follower_count(Count, Node, QName) ->
     Q = lookup(Node, QName),
     [{_, Pids}] = rpc:call(Node, rabbit_amqqueue, info, [Q, [slave_pids]]),
     RealCount = case Pids of
@@ -270,7 +261,7 @@ assert_slave_count(Count, Node, QName) ->
             ok;
         _ when RealCount < Count ->
             timer:sleep(10),
-            assert_slave_count(Count, Node, QName);
+            assert_follower_count(Count, Node, QName);
         _ ->
-            exit({too_many_slaves, Count, RealCount})
+            exit({too_many_replicas, Count, RealCount})
     end.

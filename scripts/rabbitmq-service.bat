@@ -1,17 +1,8 @@
 @echo off
-REM  The contents of this file are subject to the Mozilla Public License
-REM  Version 1.1 (the "License"); you may not use this file except in
-REM  compliance with the License. You may obtain a copy of the License
-REM  at https://www.mozilla.org/MPL/
+REM  This Source Code Form is subject to the terms of the Mozilla Public
+REM  License, v. 2.0. If a copy of the MPL was not distributed with this
+REM  file, You can obtain one at https://mozilla.org/MPL/2.0/.
 REM
-REM  Software distributed under the License is distributed on an "AS IS"
-REM  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-REM  the License for the specific language governing rights and
-REM  limitations under the License.
-REM
-REM  The Original Code is RabbitMQ.
-REM
-REM  The Initial Developer of the Original Code is GoPivotal, Inc.
 REM  Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 REM
 
@@ -66,6 +57,33 @@ if "!RABBITMQ_NODENAME!"=="" (
     )
 )
 set NAMETYPE=
+
+REM Set Erlang distribution port, based on the AMQP TCP port.
+REM
+REM We do this only for the Windows service because in this case, the node has
+REM to start with the distribution enabled on the command line. For all other
+REM cases, distribution is configured at runtime.
+if "!RABBITMQ_NODE_PORT!"=="" (
+    if not "!NODE_PORT!"=="" (
+        set RABBITMQ_NODE_PORT=!NODE_PORT!
+    ) else (
+        set RABBITMQ_NODE_PORT=5672
+    )
+)
+
+if "!RABBITMQ_DIST_PORT!"=="" (
+    if "!DIST_PORT!"=="" (
+        if "!RABBITMQ_NODE_PORT!"=="" (
+            set RABBITMQ_DIST_PORT=25672
+        ) else (
+            set /a RABBITMQ_DIST_PORT=20000+!RABBITMQ_NODE_PORT!
+        )
+    ) else (
+        set RABBITMQ_DIST_PORT=!DIST_PORT!
+    )
+)
+
+set RABBITMQ_DIST_ARG=-kernel inet_dist_listen_min !RABBITMQ_DIST_PORT! -kernel inet_dist_listen_max !RABBITMQ_DIST_PORT!
 
 set STARVAR=
 shift
@@ -184,6 +202,7 @@ set ERLANG_SERVICE_ARGUMENTS= ^
 !RABBITMQ_SERVER_ERL_ARGS! ^
 !RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS! ^
 !RABBITMQ_SERVER_START_ARGS! ^
+!RABBITMQ_DIST_ARG! ^
 -lager crash_log false ^
 -lager handlers "[]" ^
 !STARVAR!

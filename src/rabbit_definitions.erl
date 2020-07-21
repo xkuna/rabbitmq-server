@@ -1,16 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -19,7 +10,8 @@
 
 -export([boot/0]).
 %% automatic import on boot
--export([maybe_load_definitions/0, maybe_load_definitions/2, maybe_load_definitions_from/2]).
+-export([maybe_load_definitions/0, maybe_load_definitions/2, maybe_load_definitions_from/2,
+         has_configured_definitions_to_load/0]).
 %% import
 -export([import_raw/1, import_raw/2, import_parsed/1, import_parsed/2,
          apply_defs/2, apply_defs/3, apply_defs/4, apply_defs/5]).
@@ -66,7 +58,6 @@ boot() ->
     rabbit_sup:start_supervisor_child(definition_import_pool_sup, worker_pool_sup, [PoolSize, ?IMPORT_WORK_POOL]).
 
 maybe_load_definitions() ->
-    rabbit_log:debug("Will import definitions file from load_definitions"),
     %% Note that management.load_definitions is handled in the plugin for backwards compatibility.
     %% This executes the "core" version of load_definitions.
     maybe_load_definitions(rabbit, load_definitions).
@@ -138,11 +129,24 @@ all_definitions() ->
 %% Implementation
 %%
 
+-spec has_configured_definitions_to_load() -> boolean().
+has_configured_definitions_to_load() ->
+    case application:get_env(rabbit, load_definitions) of
+        undefined   -> false;
+        {ok, none}  -> false;
+        {ok, _Path} -> true
+    end.
+
 maybe_load_definitions(App, Key) ->
     case application:get_env(App, Key) of
-        undefined  -> ok;
-        {ok, none} -> ok;
+        undefined  ->
+            rabbit_log:debug("No definition file configured to import via load_definitions"),
+            ok;
+        {ok, none} ->
+            rabbit_log:debug("No definition file configured to import via load_definitions"),
+            ok;
         {ok, FileOrDir} ->
+            rabbit_log:debug("Will import definitions file from load_definitions"),
             IsDir = filelib:is_dir(FileOrDir),
             maybe_load_definitions_from(IsDir, FileOrDir)
     end.
@@ -172,10 +176,10 @@ load_definitions_from_filenames([File|Rest]) ->
 load_definitions_from_file(File) ->
     case file:read_file(File) of
         {ok, Body} ->
-            rabbit_log:info("Applying definitions from ~s", [File]),
+            rabbit_log:info("Applying definitions from file at '~s'", [File]),
             import_raw(Body);
         {error, E} ->
-            rabbit_log:error("Could not read definitions from ~s, Error: ~p", [File, E]),
+            rabbit_log:error("Could not read definitions from file at '~s', error: ~p", [File, E]),
             {error, {could_not_read_defs, {File, E}}}
     end.
 
@@ -643,7 +647,7 @@ exchange_definition(#exchange{name = #resource{virtual_host = VHost, name = Name
       <<"type">> => Type,
       <<"durable">> => Durable,
       <<"auto_delete">> => AD,
-      <<"arguments">> => Args}.
+      <<"arguments">> => rabbit_misc:amqp_table(Args)}.
 
 list_queues() ->
     %% exclude exclusive queues, they cannot be restored
@@ -667,7 +671,7 @@ queue_definition(Q) ->
         <<"type">> => Type,
         <<"durable">> => amqqueue:is_durable(Q),
         <<"auto_delete">> => amqqueue:is_auto_delete(Q),
-        <<"arguments">> => maps:from_list(Arguments)
+        <<"arguments">> => rabbit_misc:amqp_table(Arguments)
     }.
 
 list_bindings() ->
@@ -684,7 +688,7 @@ binding_definition(#binding{source      = S,
         <<"destination">> => D#resource.name,
         <<"destination_type">> => D#resource.kind,
         <<"routing_key">> => RoutingKey,
-        <<"arguments">> => maps:from_list(Arguments)
+        <<"arguments">> => rabbit_misc:amqp_table(Arguments)
     }.
 
 list_vhosts() ->
@@ -715,7 +719,7 @@ runtime_parameter_definition(Param) ->
         <<"vhost">> => pget(vhost, Param),
         <<"component">> => pget(component, Param),
         <<"name">> => pget(name, Param),
-        <<"value">> => pget(value, Param)
+        <<"value">> => maps:from_list(pget(value, Param))
     }.
 
 list_global_runtime_parameters() ->

@@ -1,16 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -1548,7 +1539,7 @@ handle_cast({deliver,
                end,
     State1 = State#q{senders = Senders1},
     noreply(maybe_deliver_or_enqueue(Delivery, SlaveWhenPublished, State1));
-%% [0] The second ack is since the channel thought we were a slave at
+%% [0] The second ack is since the channel thought we were a mirror at
 %% the time it published this message, so it used two credits (see
 %% rabbit_queue_type:deliver/2).
 
@@ -1650,7 +1641,7 @@ handle_cast(notify_decorators, State) ->
 handle_cast(policy_changed, State = #q{q = Q0}) ->
     Name = amqqueue:get_name(Q0),
     %% We depend on the #q.q field being up to date at least WRT
-    %% policy (but not slave pids) in various places, so when it
+    %% policy (but not mirror pids) in various places, so when it
     %% changes we go and read it from Mnesia again.
     %%
     %% This also has the side effect of waking us up so we emit a
@@ -1660,7 +1651,7 @@ handle_cast(policy_changed, State = #q{q = Q0}) ->
 
 handle_cast({sync_start, _, _}, State = #q{q = Q}) ->
     Name = amqqueue:get_name(Q),
-    %% Only a slave should receive this, it means we are a duplicated master
+    %% Only a mirror should receive this, it means we are a duplicated master
     rabbit_mirror_queue_misc:log_warning(
       Name, "Stopping after receiving sync_start from another master", []),
     stop(State).

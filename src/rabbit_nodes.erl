@@ -1,17 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -20,8 +10,8 @@
 -export([names/1, diagnostics/1, make/1, make/2, parts/1, cookie_hash/0,
          is_running/2, is_process_running/2,
          cluster_name/0, set_cluster_name/1, set_cluster_name/2, ensure_epmd/0,
-         all_running/0, name_type/0, running_count/0,
-         await_running_count/2,
+         all_running/0, name_type/0, running_count/0, total_count/0,
+         await_running_count/2, is_single_node_cluster/0,
          boot/0]).
 -export([persistent_cluster_id/0, seed_internal_cluster_id/0, seed_user_provided_cluster_name/0]).
 
@@ -138,15 +128,19 @@ ensure_epmd() ->
     rabbit_nodes_common:ensure_epmd().
 
 -spec all_running() -> [node()].
-
 all_running() -> rabbit_mnesia:cluster_nodes(running).
 
 -spec running_count() -> integer().
-
 running_count() -> length(all_running()).
 
--spec await_running_count(integer(), integer()) -> 'ok' | {'error', atom()}.
+-spec total_count() -> integer().
+total_count() -> length(rabbit_mnesia:cluster_nodes(all)).
 
+-spec is_single_node_cluster() -> boolean().
+is_single_node_cluster() ->
+    total_count() =:= 1.
+
+-spec await_running_count(integer(), integer()) -> 'ok' | {'error', atom()}.
 await_running_count(TargetCount, Timeout) ->
     Retries = round(Timeout/?SAMPLING_INTERVAL),
     await_running_count_with_retries(TargetCount, Retries).

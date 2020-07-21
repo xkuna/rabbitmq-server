@@ -1,16 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -148,7 +139,7 @@ run_peer_discovery_with_retries(RetriesLeft, DelayInterval) ->
         case rabbit_peer_discovery:discover_cluster_nodes() of
             {error, Reason} ->
                 RetriesLeft1 = RetriesLeft - 1,
-                rabbit_log:error("Peer discovery returned an error: ~p. Will retry after a delay of ~b, ~b retries left...",
+                rabbit_log:error("Peer discovery returned an error: ~p. Will retry after a delay of ~b ms, ~b retries left...",
                                 [Reason, DelayInterval, RetriesLeft1]),
                 timer:sleep(DelayInterval),
                 run_peer_discovery_with_retries(RetriesLeft1, DelayInterval);
@@ -202,7 +193,7 @@ join_discovered_peers_with_retries(TryNodes, NodeType, RetriesLeft, DelayInterva
             rabbit_node_monitor:notify_joined_cluster();
         none ->
             RetriesLeft1 = RetriesLeft - 1,
-            rabbit_log:error("Trying to join discovered peers failed. Will retry after a delay of ~b, ~b retries left...",
+            rabbit_log:error("Trying to join discovered peers failed. Will retry after a delay of ~b ms, ~b retries left...",
                             [DelayInterval, RetriesLeft1]),
             timer:sleep(DelayInterval),
             join_discovered_peers_with_retries(TryNodes, NodeType, RetriesLeft1, DelayInterval)
@@ -580,7 +571,7 @@ init_db(ClusterNodes, NodeType, CheckOtherNodes) ->
             %% Subsequent node in cluster, catch up
             maybe_force_load(),
             ok = rabbit_table:wait_for_replicated(_Retry = true),
-            ok = rabbit_table:create_local_copy(NodeType)
+            ok = rabbit_table:ensure_local_copies(NodeType)
     end,
     ensure_feature_flags_are_in_sync(Nodes, NodeIsVirgin),
     ensure_schema_integrity(),
@@ -833,10 +824,17 @@ schema_ok_or_move() ->
 %% up only
 create_schema() ->
     stop_mnesia(),
+    rabbit_log:debug("Will bootstrap a schema database..."),
     rabbit_misc:ensure_ok(mnesia:create_schema([node()]), cannot_create_schema),
+    rabbit_log:debug("Bootstraped a schema database successfully"),
     start_mnesia(),
+    
+    rabbit_log:debug("Will create schema database tables"),
     ok = rabbit_table:create(),
+    rabbit_log:debug("Created schema database tables successfully"),
+    rabbit_log:debug("Will check schema database integrity..."),
     ensure_schema_integrity(),
+    rabbit_log:debug("Schema database schema integrity check passed"),
     ok = rabbit_version:record_desired().
 
 move_db() ->

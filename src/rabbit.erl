@@ -1,16 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -104,17 +95,7 @@
 -rabbit_boot_step({definition_import_worker_pool,
                    [{description, "dedicated worker pool for definition import"},
                     {mfa,         {rabbit_definitions, boot, []}},
-                    {requires,    external_infrastructure},
-                    {enables,     load_core_definitions}]}).
-
-%% We want to A) make sure we apply definitions before the node begins serving
-%% traffic and B) in fact do it before empty_db_check (so the defaults will not
-%% get created if we don't need 'em).
--rabbit_boot_step({load_core_definitions,
-                   [{description, "imports definitions"},
-                    {mfa,         {rabbit_definitions, maybe_load_definitions, []}},
-                    {requires,    [recovery, definition_import_worker_pool]},
-                    {enables,     empty_db_check}]}).
+                    {requires,    external_infrastructure}]}).
 
 -rabbit_boot_step({external_infrastructure,
                    [{description, "external infrastructure ready"}]}).
@@ -274,8 +255,8 @@
                     {requires,    pre_flight}]}).
 
 -rabbit_boot_step({networking,
-                   [{description, "TCP and TLS listeners"},
-                    {mfa,         {rabbit_networking, boot, []}},
+                   [{description, "TCP and TLS listeners (backwards compatibility)"},
+                    {mfa,         {rabbit_log, debug, ["'networking' boot step skipped and moved to end of startup", []]}},
                     {requires,    notify_cluster}]}).
 
 %%---------------------------------------------------------------------------
@@ -367,15 +348,7 @@ run_prelaunch_second_phase() ->
     %% 3. Logging.
     ok = rabbit_prelaunch_logging:setup(Context),
 
-    case IsInitialPass of
-        true ->
-            %% 4. HiPE compilation.
-            ok = rabbit_prelaunch_hipe:setup(Context);
-        false ->
-            ok
-    end,
-
-    %% 5. Clustering.
+    %% 4. Clustering.
     ok = rabbit_prelaunch_cluster:setup(Context),
 
     %% Start Mnesia now that everything is ready.
@@ -695,6 +668,7 @@ status() ->
           {erlang_version,       erlang:system_info(system_version)},
           {memory,               rabbit_vm:memory()},
           {alarms,               alarms()},
+          {is_under_maintenance, rabbit_maintenance:is_being_drained_local_read(node())},
           {listeners,            listeners()},
           {vm_memory_calculation_strategy, vm_memory_monitor:get_memory_calculation_strategy()}],
     S2 = rabbit_misc:filter_exit_map(
@@ -952,12 +926,26 @@ do_run_postlaunch_phase() ->
                   end
           end, Plugins),
 
+        rabbit_log_prelaunch:info("Resetting node maintenance status"),
+        %% successful boot resets node maintenance state
+        rabbit_maintenance:unmark_as_being_drained(),
         rabbit_log_prelaunch:debug("Marking ~s as running", [product_name()]),
         rabbit_boot_state:set(ready),
 
         ok = rabbit_lager:broker_is_started(),
         ok = log_broker_started(
-               rabbit_plugins:strictly_plugins(rabbit_plugins:active()))
+               rabbit_plugins:strictly_plugins(rabbit_plugins:active())),
+        %% export definitions after all plugins have been enabled,
+        %% see rabbitmq/rabbitmq-server#2384
+        case rabbit_definitions:maybe_load_definitions() of
+            ok -> ok;
+            DefLoadError -> throw(DefLoadError)
+        end,
+
+        %% start listeners after all plugins have been enabled,
+        %% see rabbitmq/rabbitmq-server#2405
+        rabbit_log_prelaunch:info("Ready to start client connection listeners"),
+        ok = rabbit_networking:boot()
     catch
         throw:{error, _} = Error ->
             rabbit_prelaunch_errors:log_error(Error),
@@ -1010,9 +998,14 @@ recover() ->
 -spec maybe_insert_default_data() -> 'ok'.
 
 maybe_insert_default_data() ->
-    case rabbit_table:needs_default_data() of
-        true  -> insert_default_data();
-        false -> ok
+    NoDefsToImport = not rabbit_definitions:has_configured_definitions_to_load(),
+    case rabbit_table:needs_default_data() andalso NoDefsToImport of
+        true  ->
+            rabbit_log:info("Will seed default virtual host and user..."),
+            insert_default_data();
+        false ->
+            rabbit_log:info("Will not seed default virtual host and user: have definitions to load..."),
+            ok
     end.
 
 insert_default_data() ->

@@ -1,17 +1,8 @@
 @echo off
-REM  The contents of this file are subject to the Mozilla Public License
-REM  Version 1.1 (the "License"); you may not use this file except in
-REM  compliance with the License. You may obtain a copy of the License
-REM  at https://www.mozilla.org/MPL/
+REM  This Source Code Form is subject to the terms of the Mozilla Public
+REM  License, v. 2.0. If a copy of the MPL was not distributed with this
+REM  file, You can obtain one at https://mozilla.org/MPL/2.0/.
 REM
-REM  Software distributed under the License is distributed on an "AS IS"
-REM  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-REM  the License for the specific language governing rights and
-REM  limitations under the License.
-REM
-REM  The Original Code is RabbitMQ.
-REM
-REM  The Initial Developer of the Original Code is GoPivotal, Inc.
 REM  Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 REM
 
@@ -49,6 +40,8 @@ if not defined ERL_CRASH_DUMP_SECONDS (
 -boot !CLEAN_BOOT_FILE! ^
 -noinput -noshell -hidden -smp enable ^
 !RABBITMQ_CTL_ERL_ARGS! ^
+-kernel inet_dist_listen_min !RABBITMQ_CTL_DIST_PORT_MIN! ^
+-kernel inet_dist_listen_max !RABBITMQ_CTL_DIST_PORT_MAX! ^
 -run escript start ^
 -escript main rabbitmqctl_escript ^
 -extra "%RABBITMQ_HOME%\escript\rabbitmq-upgrade" !STAR!

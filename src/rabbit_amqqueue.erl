@@ -1,16 +1,7 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
 %% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
@@ -33,7 +24,6 @@
          emit_info_local/4, emit_info_down/4]).
 -export([count/0]).
 -export([list_down/1, count/1, list_names/0, list_names/1, list_local_names/0,
-         list_local_mirrored_classic_names/0,
          list_local_names_down/0, list_with_possible_retry/1]).
 -export([list_by_type/1, sample_local_queues/0, sample_n_by_name/2, sample_n/2]).
 -export([force_event_refresh/1, notify_policy_changed/1]).
@@ -46,8 +36,9 @@
 -export([update_mirroring/1, sync_mirrors/1, cancel_sync_mirrors/1]).
 -export([emit_unresponsive/6, emit_unresponsive_local/5, is_unresponsive/2]).
 -export([has_synchronised_mirrors_online/1]).
--export([is_replicated/1, is_dead_exclusive/1]). % Note: exported due to use in qlc expression.
+-export([is_replicated/1, is_exclusive/1, is_not_exclusive/1, is_dead_exclusive/1]).
 -export([list_local_quorum_queues/0, list_local_quorum_queue_names/0,
+         list_local_mirrored_classic_queues/0, list_local_mirrored_classic_names/0,
          list_local_leaders/0, list_local_followers/0, get_quorum_nodes/1,
          list_local_mirrored_classic_without_synchronised_mirrors/0,
          list_local_mirrored_classic_without_synchronised_mirrors_for_cli/0]).
@@ -581,7 +572,7 @@ with(#resource{} = Name, F, E, RetriesLeft) ->
         {ok, Q} when ?amqqueue_state_is(Q, crashed) ->
             E({absent, Q, crashed});
         %% The queue process has been stopped by a supervisor.
-        %% In that case a synchronised slave can take over
+        %% In that case a synchronised mirror can take over
         %% so we should retry.
         {ok, Q} when ?amqqueue_state_is(Q, stopped) ->
             %% The queue process was stopped by the supervisor
@@ -590,7 +581,7 @@ with(#resource{} = Name, F, E, RetriesLeft) ->
               fun () -> F(Q) end);
         %% The queue is supposed to be active.
         %% The master node can go away or queue can be killed
-        %% so we retry, waiting for a slave to take over.
+        %% so we retry, waiting for a mirror to take over.
         {ok, Q} when ?amqqueue_state_is(Q, live) ->
             %% We check is_process_alive(QPid) in case we receive a
             %% nodedown (for example) in F() that has nothing to do
@@ -617,7 +608,7 @@ retry_wait(Q, F, E, RetriesLeft) ->
     QState = amqqueue:get_state(Q),
     case {QState, is_replicated(Q)} of
         %% We don't want to repeat an operation if
-        %% there are no slaves to migrate to
+        %% there are no mirrors to migrate to
         {stopped, false} ->
             E({absent, Q, stopped});
         _ ->
@@ -1029,6 +1020,14 @@ list_local_followers() ->
          rabbit_quorum_queue:is_recoverable(Q)
          ].
 
+-spec list_local_mirrored_classic_queues() -> [amqqueue:amqqueue()].
+list_local_mirrored_classic_queues() ->
+    [ Q || Q <- list(),
+        amqqueue:get_state(Q) =/= crashed,
+        amqqueue:is_classic(Q),
+        is_local_to_node(amqqueue:get_pid(Q), node()),
+        is_replicated(Q)].
+
 -spec list_local_mirrored_classic_names() -> [rabbit_amqqueue:name()].
 list_local_mirrored_classic_names() ->
     [ amqqueue:get_name(Q) || Q <- list(),
@@ -1043,6 +1042,8 @@ list_local_mirrored_classic_without_synchronised_mirrors() ->
     [ Q || Q <- list(),
          amqqueue:get_state(Q) =/= crashed,
          amqqueue:is_classic(Q),
+         %% filter out exclusive queues as they won't actually be mirrored
+         is_not_exclusive(Q),
          is_local_to_node(amqqueue:get_pid(Q), node()),
          is_replicated(Q),
          not has_synchronised_mirrors_online(Q)].
@@ -1054,10 +1055,10 @@ list_local_mirrored_classic_without_synchronised_mirrors_for_cli() ->
     [begin
          #resource{name = Name} = amqqueue:get_name(Q),
          #{
-             <<"readable_name">> => rabbit_misc:rs(amqqueue:get_name(Q)),
-             <<"name">> => Name,
-             <<"virtual_host">> => amqqueue:get_vhost(Q),
-             <<"type">> => <<"quorum">>
+             <<"readable_name">> => rabbit_data_coercion:to_binary(rabbit_misc:rs(amqqueue:get_name(Q))),
+             <<"name">>          => Name,
+             <<"virtual_host">>  => amqqueue:get_vhost(Q),
+             <<"type">>          => <<"classic">>
          }
      end || Q <- ClassicQs].
 
@@ -1600,8 +1601,8 @@ forget_all_durable(Node) ->
           end),
     ok.
 
-%% Try to promote a slave while down - it should recover as a
-%% master. We try to take the oldest slave here for best chance of
+%% Try to promote a mirror while down - it should recover as a
+%% master. We try to take the oldest mirror here for best chance of
 %% recovery.
 forget_node_for_queue(_DeadNode, Q)
   when ?amqqueue_is_quorum(Q) ->
@@ -1611,7 +1612,7 @@ forget_node_for_queue(DeadNode, Q) ->
     forget_node_for_queue(DeadNode, RS, Q).
 
 forget_node_for_queue(_DeadNode, [], Q) ->
-    %% No slaves to recover from, queue is gone.
+    %% No mirrors to recover from, queue is gone.
     %% Don't process_deletions since that just calls callbacks and we
     %% are not really up.
     Name = amqqueue:get_name(Q),
@@ -1694,6 +1695,14 @@ is_replicated(Q) when ?amqqueue_is_quorum(Q) ->
 is_replicated(Q) ->
     rabbit_mirror_queue_misc:is_mirrored(Q).
 
+is_exclusive(Q) when ?amqqueue_exclusive_owner_is(Q, none) ->
+    false;
+is_exclusive(Q) when ?amqqueue_exclusive_owner_is_pid(Q) ->
+    true.
+
+is_not_exclusive(Q) ->
+    not is_exclusive(Q).
+
 is_dead_exclusive(Q) when ?amqqueue_exclusive_owner_is(Q, none) ->
     false;
 is_dead_exclusive(Q) when ?amqqueue_exclusive_owner_is_pid(Q) ->
@@ -1725,12 +1734,12 @@ maybe_clear_recoverable_node(Node, Q) ->
         true  ->
             %% There is a race with
             %% rabbit_mirror_queue_slave:record_synchronised/1 called
-            %% by the incoming slave node and this function, called
+            %% by the incoming mirror node and this function, called
             %% by the master node. If this function is executed after
             %% record_synchronised/1, the node is erroneously removed
-            %% from the recoverable slaves list.
+            %% from the recoverable mirrors list.
             %%
-            %% We check if the slave node's queue PID is alive. If it is
+            %% We check if the mirror node's queue PID is alive. If it is
             %% the case, then this function is executed after. In this
             %% situation, we don't touch the queue record, it is already
             %% correct.
