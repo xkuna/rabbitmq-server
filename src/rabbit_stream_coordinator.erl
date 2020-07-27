@@ -49,6 +49,7 @@
 -define(STREAM_COORDINATOR_STARTUP, {stream_coordinator_startup, self()}).
 -define(TICK_TIMEOUT, 60000).
 -define(RESTART_TIMEOUT, 1000).
+-define(PHASE_RETRY_TIMEOUT, 10000).
 
 -record(?MODULE, {streams, monitors}).
 
@@ -546,6 +547,8 @@ apply(_Meta, {stream_updated, #{name := StreamId} = Conf}, #?MODULE{streams = St
 apply(_, {timeout, {pipeline, Cmds}}, State) ->
     Actions = [{mod_call, ra, pipeline_command, [{?MODULE, node()}, Cmd]} || Cmd <- Cmds],
     {State, ok, Actions};
+apply(_, {timeout, {aux, Cmd}}, State) ->
+    {State, ok, [{aux, Cmd}]};
 apply(Meta, {_, #{from := From}} = Cmd, State) ->
     ?MODULE:apply(Meta#{from => From}, Cmd, State).
 
@@ -663,16 +666,14 @@ handle_aux(leader, _, {down, Pid, Reason}, {Monitors0, Coordinator}, LogState, _
         {phase, StreamId, phase_start_new_leader, Args} ->
             rabbit_log:warning("Error while starting new leader for stream queue ~p, "
                                "restarting election: ~p", [StreamId, Reason]),
-            NewPid = erlang:apply(?MODULE, phase_check_quorum, Args),
-            Monitors = maps:put(NewPid, {phase, StreamId, phase_check_quorum, Args},
-                                maps:remove(Pid, Monitors0)),
-            {no_reply, {Monitors, Coordinator}, LogState};
-        {phase, StreamId, Fun, Args} = Cmd ->
+            Monitors = maps:remove(Pid, Monitors0),
+            Cmd = {phase, StreamId, phase_check_quorum, Args},
+            {no_reply, {Monitors, Coordinator}, LogState, [{timer, {aux, Cmd}, ?PHASE_RETRY_TIMEOUT}]};
+        {phase, StreamId, Fun, _} = Cmd ->
             rabbit_log:warning("Error while executing coordinator phase ~p for stream queue ~p ~p",
                                [Fun, StreamId, Reason]),
-            NewPid = erlang:apply(?MODULE, Fun, Args),
-            Monitors = maps:put(NewPid, Cmd, maps:remove(Pid, Monitors0)),
-            {no_reply, {Monitors, Coordinator}, LogState}
+            Monitors = maps:remove(Pid, Monitors0),
+            {no_reply, {Monitors, Coordinator}, LogState, [{timer, {aux, Cmd}, ?PHASE_RETRY_TIMEOUT}]}
     end;
 handle_aux(_, _, _, AuxState, LogState, _) ->
     {no_reply, AuxState, LogState}.
