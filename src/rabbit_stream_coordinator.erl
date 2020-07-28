@@ -495,13 +495,15 @@ apply(_Meta, {start_leader_election, StreamId, NewEpoch, Offsets},
                      [StreamId]),
     {State#?MODULE{streams = Streams#{StreamId => SState}}, ok,
      [{aux, {phase, StreamId, Phase, PhaseArgs}}]};
-apply(_Meta, {leader_elected, #{name := StreamId,
-                                leader_pid := LeaderPid,
-                                replica_nodes := Replicas} = Conf},
+apply(_Meta, {leader_elected, StreamId, NewLeaderPid},
       #?MODULE{streams = Streams, monitors = Monitors0} = State) ->
     rabbit_log:info("rabbit_stream_coordinator: ~p leader elected", [StreamId]),
-    #{subscribers := Subs,
+    #{conf := Conf0,
+      subscribers := Subs,
       pending_cmds := Pending0} = SState0 = maps:get(StreamId, Streams),
+    #{leader_pid := LeaderPid,
+      replica_nodes := Replicas} = Conf0,
+    Conf = Conf0#{leader_pid => NewLeaderPid},
     Phase = phase_repair_mnesia,
     PhaseArgs = [update, Conf],
     Pending = Pending0 ++ [{start_replica, #{stream_id => StreamId, node => R,
@@ -513,12 +515,12 @@ apply(_Meta, {leader_elected, #{name := StreamId,
                       pending_replicas => Replicas,
                       pending_cmds => Pending},
     Events = emit_leader_up_events(maps:get(reference, Conf), LeaderPid, Subs),
-    Monitors = maps:put(LeaderPid, {StreamId, leader}, Monitors0),
+    Monitors = maps:put(NewLeaderPid, {StreamId, leader}, maps:remove(LeaderPid, Monitors0)),
     rabbit_log:debug("rabbit_stream_coordinator: ~p entering ~p after "
                      "leader election", [StreamId, Phase]),
     {State#?MODULE{streams = Streams#{StreamId => SState},
                    monitors = Monitors}, ok,
-     Events ++ [{monitor, process, LeaderPid},
+     Events ++ [{monitor, process, NewLeaderPid},
                 {aux, {phase, StreamId, Phase, PhaseArgs}}]};
 apply(_Meta, {replicas_stopped, StreamId}, #?MODULE{streams = Streams} = State) ->
     #{conf := Conf0} = maps:get(StreamId, Streams),
@@ -776,20 +778,20 @@ phase_stop_replicas(#{replica_nodes := Replicas,
               ra:pipeline_command({?MODULE, node()}, {replicas_stopped, StreamId})
       end).
 
-phase_start_new_leader(#{leader_node := Node} = Conf) ->
+phase_start_new_leader(#{name := StreamId, leader_node := Node, leader_pid := LPid} = Conf) ->
     spawn(fun() ->
                   osiris_replica:stop(Node, Conf),
                   %% If the start fails, the monitor will capture the crash and restart it
                   case osiris_writer:start(Conf) of
                       {ok, Pid} ->
                           ra:pipeline_command({?MODULE, node()},
-                                              {leader_elected, maps:put(leader_pid, Pid, Conf)});
+                                              {leader_elected, StreamId, Pid});
                       {error, already_present} ->
                           ra:pipeline_command({?MODULE, node()},
-                                              {leader_elected, Conf});
+                                              {leader_elected, StreamId, LPid});
                       {error, {already_started, Pid}} ->
                           ra:pipeline_command({?MODULE, node()},
-                                              {leader_elected, maps:put(leader_pid, Pid, Conf)})
+                                              {leader_elected, StreamId, Pid})
                   end
           end).
 
