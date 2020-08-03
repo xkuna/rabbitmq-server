@@ -38,9 +38,6 @@
          state_info/1,
          stat/1]).
 
--export([subscribe/1,
-         unsubscribe/1]).
-
 -export([set_retention_policy/3]).
 -export([add_replica/3,
          delete_replica/3]).
@@ -133,14 +130,6 @@ policy_changed(_Q) ->
 
 stat(_) ->
     {ok, 0, 0}.
-
-subscribe(QName) ->
-    {ok, Reply, _} = rabbit_stream_coordinator:subscribe(queue_name(QName), self()),
-    Reply.
-
-unsubscribe(QName) ->
-    {ok, Reply, _} = rabbit_stream_coordinator:unsubscribe(queue_name(QName), self()),
-    Reply.
 
 consume(Q, #{prefetch_count := 0}, _)
   when ?amqqueue_is_stream(Q) ->

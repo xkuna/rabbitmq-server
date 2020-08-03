@@ -80,9 +80,7 @@ all_tests() ->
      consume_credit_multiple_ack,
      basic_cancel,
      max_length_bytes,
-     max_age,
-     subscribe_to_events,
-     unsubscribe_to_events
+     max_age
     ].
 
 %% -------------------------------------------------------------------
@@ -289,61 +287,6 @@ delete_queue(Config) ->
                  declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
     ?assertMatch(#'queue.delete_ok'{},
                  amqp_channel:call(Ch, #'queue.delete'{queue = Q})).
-
-subscribe_to_events(Config) ->
-    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-
-    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
-    QName = ?config(queue_name, Config),
-    ?assertEqual({'queue.declare_ok', QName, 0, 0},
-                 declare(Ch, QName, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
-    R = rabbit_misc:r(<<"/">>, queue, QName),
-    {ok, Q} = rpc:call(Server, rabbit_amqqueue, lookup, [R]),
-    #{name := StreamId} = amqqueue:get_type_state(Q),
-    Self = self(),
-    {ok, ok, _} = rpc:call(Server, rabbit_stream_coordinator, subscribe, [StreamId, Self]),
-    receive
-        {leader_up, R, _} ->
-            ok
-    after 5000 ->
-            exit(timeout_leader_up)
-    end,
-    ?assertMatch(#'queue.delete_ok'{},
-                 amqp_channel:call(Ch, #'queue.delete'{queue = QName})),
-    receive
-        {queue_deleted, R} ->
-            ok
-    after 5000 ->
-            exit(timeout_queue_deleted)
-    end.
-
-unsubscribe_to_events(Config) ->
-    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-
-    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
-    QName = ?config(queue_name, Config),
-    ?assertEqual({'queue.declare_ok', QName, 0, 0},
-                 declare(Ch, QName, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
-    R = rabbit_misc:r(<<"/">>, queue, QName),
-    {ok, Q} = rpc:call(Server, rabbit_amqqueue, lookup, [R]),
-    #{name := StreamId} = amqqueue:get_type_state(Q),
-    Self = self(),
-    {ok, ok, _} = rpc:call(Server, rabbit_stream_coordinator, subscribe, [StreamId, Self]),
-    receive
-        {leader_up, R, _} ->
-            ok
-    after 5000 ->
-            exit(timeout_leader_up)
-    end,
-    {ok, ok, _} = rpc:call(Server, rabbit_stream_coordinator, unsubscribe, [StreamId, Self]),
-    ?assertMatch(#'queue.delete_ok'{},
-                 amqp_channel:call(Ch, #'queue.delete'{queue = QName})),
-    receive
-        {queue_deleted, R} ->
-            exit(unexpected_event)
-    after 2000 ->
-            ok
-    end.
 
 add_replica(Config) ->
     [Server0, Server1, Server2] =
