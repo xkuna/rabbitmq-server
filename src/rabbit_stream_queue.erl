@@ -36,12 +36,14 @@
          close/1,
          update/2,
          state_info/1,
-         stat/1]).
+         stat/1,
+         is_policy_applicable/2]).
 
 -export([set_retention_policy/3]).
 -export([add_replica/3,
          delete_replica/3]).
 -export([format_osiris_event/2]).
+-export([update_stream_conf/1]).
 
 -include("rabbit.hrl").
 -include("amqqueue.hrl").
@@ -125,8 +127,9 @@ purge(_Q) ->
     {ok, 0}.
 
 -spec policy_changed(amqqueue:amqqueue()) -> 'ok'.
-policy_changed(_Q) ->
-    ok.
+policy_changed(Q) ->
+    Name = maps:get(name, amqqueue:get_type_state(Q)),
+    rabbit_stream_coordinator:policy_changed(Name).
 
 stat(_) ->
     {ok, 0, 0}.
@@ -382,7 +385,24 @@ i(committed_offset, Q) ->
     %% TODO should it be on a metrics table?
     Data = osiris_counters:overview(),
     maps:get(committed_offset,
-             maps:get({osiris_writer, amqqueue:get_name(Q)}, Data)).
+             maps:get({osiris_writer, amqqueue:get_name(Q)}, Data));
+i(policy, Q) ->
+    case rabbit_policy:name(Q) of
+        none   -> '';
+        Policy -> Policy
+    end;
+i(operator_policy, Q) ->
+    case rabbit_policy:name_op(Q) of
+        none   -> '';
+        Policy -> Policy
+    end;
+i(effective_policy_definition, Q) ->
+    case rabbit_policy:effective_definition(Q) of
+        undefined -> [];
+        Def       -> Def
+    end;
+i(type, _) ->
+    stream.
 
 init(Q) when ?is_amqqueue(Q) ->
     Leader = amqqueue:get_pid(Q),
@@ -482,6 +502,21 @@ make_stream_conf(Node, Q) ->
                                                        replica_nodes => Replicas,
                                                        event_formatter => Formatter,
                                                        epoch => 1}).
+
+update_stream_conf(#{reference := QName} = Conf) ->
+    case rabbit_amqqueue:lookup(QName) of
+        {ok, Q} ->
+            MaxBytes = args_policy_lookup(<<"max-length-bytes">>, fun min/2, Q),
+            MaxAge = max_age(args_policy_lookup(<<"max-age">>, fun max_age/2, Q)),
+            MaxSegmentSize = args_policy_lookup(<<"max-segment-size">>, fun min/2, Q),
+            Retention = lists:filter(fun({_, R}) ->
+                                             R =/= undefined
+                                     end, [{max_bytes, MaxBytes},
+                                           {max_age, MaxAge}]),
+            add_if_defined(max_segment_size, MaxSegmentSize, Conf#{retention => Retention});
+        _ ->
+            Conf
+    end.
 
 add_if_defined(_, undefined, Map) ->
     Map;
@@ -614,3 +649,10 @@ msg_to_iodata(#basic_message{exchange_name = #resource{name = Exchange},
           #{<<"x-exchange">> => {utf8, Exchange},
             <<"x-routing-key">> => {utf8, RKey}}, R0),
     rabbit_msg_record:to_iodata(R).
+
+-spec is_policy_applicable(amqqueue:amqqueue(), any()) -> boolean().
+is_policy_applicable(_Q, Policy) ->
+    Applicable = [<<"max-length-bytes">>, <<"max-age">>, <<"max-segment-size">>],
+    lists:all(fun({P, _}) ->
+                      lists:member(P, Applicable)
+              end, Policy).

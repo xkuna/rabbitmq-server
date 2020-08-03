@@ -30,8 +30,8 @@
          settle/5,
          credit/5,
          dequeue/5,
-         fold_state/3
-
+         fold_state/3,
+         is_policy_applicable/2
          ]).
 
 %% temporary
@@ -188,6 +188,9 @@
 -callback stat(amqqueue:amqqueue()) ->
     {'ok', non_neg_integer(), non_neg_integer()}.
 
+-callback is_policy_applicable(amqqueue:amqqueue(), any()) ->
+    boolean().
+
 %% TODO: this should be controlled by a registry that is populated on boot
 discover(<<"quorum">>) ->
     rabbit_quorum_queue;
@@ -298,6 +301,10 @@ i_down(K, _Q, _DownReason) ->
         true  -> '';
         false -> throw({bad_argument, K})
     end.
+
+is_policy_applicable(Q, Policy) ->
+    Mod = amqqueue:get_type(Q),
+    Mod:is_policy_applicable(Q, Policy).
 
 -spec init() -> state().
 init() ->

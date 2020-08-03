@@ -25,6 +25,16 @@
 -define(TICK_TIMEOUT, 5000).
 -define(SERVER, ?MODULE).
 
+-define(STATISTICS_KEYS,
+        [policy,
+         operator_policy,
+         effective_policy_definition,
+         state,
+         leader,
+         online,
+         members
+        ]).
+
 -record(state, {timeout :: non_neg_integer()}).
 
 %%----------------------------------------------------------------------------
@@ -59,7 +69,7 @@ handle_info(tick, #state{timeout = Timeout} = State) ->
                                   %% TODO complete stats!
                                   case rabbit_amqqueue:lookup(QName) of
                                       {ok, Q} ->
-                                          rabbit_stream_queue:info(Q, [state, leader, members, online]);
+                                          rabbit_stream_queue:info(Q, ?STATISTICS_KEYS);
                                       _ ->
                                           []
                                   end
@@ -75,7 +85,11 @@ handle_info(tick, #state{timeout = Timeout} = State) ->
                                       []
                               end,
                       rabbit_core_metrics:queue_stats(QName, Infos),
-                      ok;
+                      rabbit_event:notify(queue_stats, Infos ++ [{name, QName},
+                                                                 {messages, COffs},
+                                                                 {messages_ready, COffs},
+                                                                 {messages_unacknowledged, 0}]),
+              ok;
           (_, _V) ->
               ok
       end, Data),

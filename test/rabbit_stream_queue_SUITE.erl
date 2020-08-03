@@ -80,7 +80,10 @@ all_tests() ->
      consume_credit_multiple_ack,
      basic_cancel,
      max_length_bytes,
-     max_age
+     max_age,
+     invalid_policy,
+     max_age_policy,
+     max_segment_size_policy
     ].
 
 %% -------------------------------------------------------------------
@@ -1128,6 +1131,72 @@ leader_failover(Config) ->
     NewLeader = proplists:get_value(leader, Info),
     ?assert(NewLeader =/= Server1),
     ok = rabbit_ct_broker_helpers:start_node(Config, Server1).
+
+invalid_policy(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+    ok = rabbit_ct_broker_helpers:set_policy(
+           Config, 0, <<"ha">>, <<"invalid_policy.*">>, <<"queues">>,
+           [{<<"ha-mode">>, <<"all">>}]),
+    ok = rabbit_ct_broker_helpers:set_policy(
+           Config, 0, <<"ttl">>, <<"invalid_policy.*">>, <<"queues">>,
+           [{<<"message-ttl">>, 5}]),
+
+    [Info] = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_amqqueue,
+                                          info_all, [<<"/">>, [policy, operator_policy,
+                                                               effective_policy_definition]]),
+
+    ?assertEqual('', proplists:get_value(policy, Info)),
+    ?assertEqual('', proplists:get_value(operator_policy, Info)),
+    ?assertEqual([], proplists:get_value(effective_policy_definition, Info)),
+    ok = rabbit_ct_broker_helpers:clear_policy(Config, 0, <<"ha">>),
+    ok = rabbit_ct_broker_helpers:clear_policy(Config, 0, <<"ttl">>).
+
+max_age_policy(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+    ok = rabbit_ct_broker_helpers:set_policy(
+           Config, 0, <<"age">>, <<"max_age_policy.*">>, <<"queues">>,
+           [{<<"max-age">>, <<"1Y">>}]),
+
+    [Info] = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_amqqueue,
+                                          info_all, [<<"/">>, [policy, operator_policy,
+                                                               effective_policy_definition]]),
+
+    ?assertEqual(<<"age">>, proplists:get_value(policy, Info)),
+    ?assertEqual('', proplists:get_value(operator_policy, Info)),
+    ?assertEqual([{<<"max-age">>, <<"1Y">>}],
+                 proplists:get_value(effective_policy_definition, Info)),
+    ok = rabbit_ct_broker_helpers:clear_policy(Config, 0, <<"age">>).
+
+max_segment_size_policy(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+    ok = rabbit_ct_broker_helpers:set_policy(
+           Config, 0, <<"segment">>, <<"max_segment_size.*">>, <<"queues">>,
+           [{<<"max-segment-size">>, 5000}]),
+
+    [Info] = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_amqqueue,
+                                          info_all, [<<"/">>, [policy, operator_policy,
+                                                               effective_policy_definition]]),
+
+    ?assertEqual(<<"segment">>, proplists:get_value(policy, Info)),
+    ?assertEqual('', proplists:get_value(operator_policy, Info)),
+    ?assertEqual([{<<"max-segment-size">>, 5000}],
+                 proplists:get_value(effective_policy_definition, Info)),
+    ok = rabbit_ct_broker_helpers:clear_policy(Config, 0, <<"segment">>).
 
 %%----------------------------------------------------------------------------
 

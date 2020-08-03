@@ -32,6 +32,8 @@
          add_replica/2,
          delete_replica/2]).
 
+-export([policy_changed/1]).
+
 -export([phase_repair_mnesia/2,
          phase_start_cluster/1,
          phase_delete_cluster/2,
@@ -105,6 +107,9 @@ add_replica(StreamId, Node) ->
     process_command({start_replica, #{stream_id => StreamId, node => Node,
                                       retries => 1}}).
 
+policy_changed(StreamId) ->
+    process_command({policy_changed, #{stream_id => StreamId}}).
+
 delete_replica(StreamId, Node) ->
     process_command({delete_replica, #{stream_id => StreamId, node => Node}}).
 
@@ -166,6 +171,25 @@ init(_Conf) ->
     #?MODULE{streams = #{},
              monitors = #{}}.
 
+apply(#{from := From}, {policy_changed, #{stream_id := StreamId}} = Cmd,
+      #?MODULE{streams = Streams0} = State) ->
+    case maps:get(StreamId, Streams0, undefined) of
+        undefined ->
+            {State, ok, []};
+        #{conf := Conf,
+          state := running} = SState0 ->
+            case rabbit_stream_queue:update_stream_conf(Conf) of
+                Conf ->
+                    %% No changes, ensure we only trigger an election if it's a must
+                    {State, ok, []};
+                _ ->
+                    {State, ok, [{mod_call, osiris_writer, stop, [Conf]}]}
+            end;
+        SState0 ->
+            Streams = maps:put(StreamId, add_pending_cmd(From, Cmd, SState0), Streams0),
+            {State#?MODULE{streams = Streams}, '$ra_no_reply', []}
+
+    end;
 apply(#{from := From}, {start_cluster, #{queue := Q}}, #?MODULE{streams = Streams} = State) ->
     #{name := StreamId} = Conf = amqqueue:get_type_state(Q),
     case maps:is_key(StreamId, Streams) of
@@ -416,10 +440,11 @@ apply(_Meta, {start_leader_election, StreamId, NewEpoch, Offsets},
     rabbit_log:info("rabbit_stream_coordinator: ~p starting new leader on node ~p",
                     [StreamId, NewLeader]),
     {ReplicaPids, _} = delete_replica_pid(NewLeader, ReplicaPids0),
-    Conf = Conf0#{epoch => NewEpoch,
-                  leader_node => NewLeader,
-                  replica_nodes => lists:delete(NewLeader, Replicas ++ [Leader]),
-                  replica_pids => ReplicaPids},
+    Conf = rabbit_stream_queue:update_stream_conf(
+             Conf0#{epoch => NewEpoch,
+                    leader_node => NewLeader,
+                    replica_nodes => lists:delete(NewLeader, Replicas ++ [Leader]),
+                    replica_pids => ReplicaPids}),
     Phase = phase_start_new_leader,
     PhaseArgs = [Conf],
     SState = SState0#{conf => Conf,

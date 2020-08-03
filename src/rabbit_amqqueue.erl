@@ -356,10 +356,8 @@ policy_changed(Q1, Q2) ->
 
 is_policy_applicable(QName, Policy) ->
     case lookup(QName) of
-        {ok, Q} when ?amqqueue_is_quorum(Q) ->
-            rabbit_quorum_queue:is_policy_applicable(Q, Policy);
-        {ok, Q} when ?amqqueue_is_classic(Q) ->
-            rabbit_amqqueue_process:is_policy_applicable(Q, Policy);
+        {ok, Q} ->
+            rabbit_queue_type:is_policy_applicable(Q, Policy);
         _ ->
             %% Defaults to previous behaviour. Apply always
             true
