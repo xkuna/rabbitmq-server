@@ -177,7 +177,7 @@ apply(#{from := From}, {policy_changed, #{stream_id := StreamId}} = Cmd,
         undefined ->
             {State, ok, []};
         #{conf := Conf,
-          state := running} = SState0 ->
+          state := running} ->
             case rabbit_stream_queue:update_stream_conf(Conf) of
                 Conf ->
                     %% No changes, ensure we only trigger an election if it's a must
@@ -851,7 +851,7 @@ phase_start_cluster(Q0) ->
                   {ok, #{leader_pid := Pid} = Conf} ->
                       Q = amqqueue:set_type_state(amqqueue:set_pid(Q0, Pid), Conf),
                       ra:pipeline_command({?MODULE, node()}, {start_cluster_reply, Q});
-                  {error, {{already_started, _}, _}} ->
+                  {error, {already_started, _}} ->
                       ra:pipeline_command({?MODULE, node()}, {start_cluster_finished, {error, already_started}})
               end
       end).
