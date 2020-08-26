@@ -115,7 +115,8 @@ define PROJECT_ENV
 	    %% Default max message size is 128 MB
 	    {max_message_size, 134217728},
 	    %% Socket writer will run GC every 1 GB of outgoing data
-	    {writer_gc_threshold, 1000000000}
+	    {writer_gc_threshold, 1000000000},
+            {return_per_user_auth_attempt_metrics, false}
 	  ]
 endef
 
