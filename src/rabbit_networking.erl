@@ -47,6 +47,7 @@
 ]).
 
 -include("rabbit.hrl").
+-include("rabbit_misc.hrl").
 
 %% IANA-suggested ephemeral port range is 49152 to 65535
 -define(FIRST_TEST_BIND_PORT, 49152).
@@ -67,12 +68,7 @@
 -type protocol() :: atom().
 -type label() :: string().
 
-%% @todo Remove once Dialyzer only runs on Erlang/OTP 21.3 or above.
--dialyzer({nowarn_function, boot/0}).
--dialyzer({nowarn_function, boot_listeners/3}).
--dialyzer({nowarn_function, record_distribution_listener/0}).
-
--spec boot() -> 'ok'.
+-spec boot() -> 'ok' | no_return().
 
 boot() ->
     ok = record_distribution_listener(),
@@ -189,14 +185,9 @@ tcp_listener_spec(NamePrefix, {IPAddress, Port, Family}, SocketOpts,
             {?MODULE, tcp_listener_started, [Protocol, SocketOpts]},
             {?MODULE, tcp_listener_stopped, [Protocol, SocketOpts]},
             NumAcceptors, Label],
-    #{
-        id => rabbit_misc:tcp_name(NamePrefix, IPAddress, Port),
-        start => {tcp_listener_sup, start_link, Args},
-        restart => transient,
-        shutdown => infinity,
-        type => supervisor,
-        modules => [tcp_listener_sup]
-    }.
+    {rabbit_misc:tcp_name(NamePrefix, IPAddress, Port),
+     {tcp_listener_sup, start_link, Args},
+     transient, infinity, supervisor, [tcp_listener_sup]}.
 
 -spec ranch_ref(#listener{} | [{atom(), any()}] | 'undefined') -> ranch:ref() | undefined.
 ranch_ref(#listener{port = Port}) ->
@@ -338,10 +329,16 @@ tcp_listener_stopped(Protocol, Opts, IPAddress, Port) ->
                      port = Port,
                      opts = Opts}).
 
+-spec record_distribution_listener() -> ok | no_return().
+
 record_distribution_listener() ->
     {Name, Host} = rabbit_nodes:parts(node()),
-    {port, Port, _Version} = erl_epmd:port_please(Name, Host),
-    tcp_listener_started(clustering, [], {0,0,0,0,0,0,0,0}, Port).
+    case erl_epmd:port_please(Name, Host, infinity) of
+        {port, Port, _Version} ->
+            tcp_listener_started(clustering, [], {0,0,0,0,0,0,0,0}, Port);
+        noport ->
+            throw({error, no_epmd_port})
+    end.
 
 -spec active_listeners() -> [rabbit_types:listener()].
 
@@ -388,8 +385,8 @@ unregister_connection(Pid) -> pg_local:leave(rabbit_connections, Pid).
 -spec connections() -> [rabbit_types:connection()].
 
 connections() ->
-    rabbit_misc:append_rpc_all_nodes(rabbit_mnesia:cluster_nodes(running),
-                                     rabbit_networking, connections_local, []).
+    Nodes = rabbit_nodes:all_running(),
+    rabbit_misc:append_rpc_all_nodes(Nodes, rabbit_networking, connections_local, [], ?RPC_TIMEOUT).
 
 -spec local_connections() -> [rabbit_types:connection()].
 %% @doc Returns pids of AMQP 0-9-1 and AMQP 1.0 connections local to this node.

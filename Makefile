@@ -116,6 +116,8 @@ define PROJECT_ENV
 	    {max_message_size, 134217728},
 	    %% Socket writer will run GC every 1 GB of outgoing data
 	    {writer_gc_threshold, 1000000000},
+	    %% interval at which connection/channel tracking executes post operations
+	    {tracking_execution_timeout, 15000},
 	    {stream_messages_soft_limit, 256}
 	  ]
 endef
@@ -132,7 +134,7 @@ BUILD_DEPS = rabbitmq_cli syslog
 DEPS = cuttlefish ranch lager rabbit_common ra sysmon_handler stdout_formatter recon observer_cli osiris amqp10_common
 TEST_DEPS = rabbitmq_ct_helpers rabbitmq_ct_client_helpers amqp_client meck proper
 
-dep_cuttlefish = hex 2.3.0
+dep_cuttlefish = hex 2.4.1
 dep_syslog = git https://github.com/schlagert/syslog 3.4.5
 dep_osiris = git git@github.com:rabbitmq/osiris.git master
 

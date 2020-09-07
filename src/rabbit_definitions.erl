@@ -664,14 +664,13 @@ queue_definition(Q) ->
                rabbit_stream_queue -> stream;
                T -> T
            end,
-    Arguments = [{Key, Value} || {Key, _Type, Value} <- amqqueue:get_arguments(Q)],
     #{
         <<"vhost">> => VHost,
         <<"name">> => Name,
         <<"type">> => Type,
         <<"durable">> => amqqueue:is_durable(Q),
         <<"auto_delete">> => amqqueue:is_auto_delete(Q),
-        <<"arguments">> => rabbit_misc:amqp_table(Arguments)
+        <<"arguments">> => rabbit_misc:amqp_table(amqqueue:get_arguments(Q))
     }.
 
 list_bindings() ->
@@ -702,14 +701,15 @@ vhost_definition(VHost) ->
     }.
 
 list_users() ->
-    [begin
-         {ok, User} = rabbit_auth_backend_internal:lookup_user(pget(user, U)),
-         #{<<"name">>              => User#internal_user.username,
-           <<"password_hash">>     => base64:encode(User#internal_user.password_hash),
-           <<"hashing_algorithm">> => rabbit_auth_backend_internal:hashing_module_for_user(User),
-           <<"tags">>              => tags_as_binaries(User#internal_user.tags)
-         }
-     end || U <- rabbit_auth_backend_internal:list_users()].
+    [user_definition(U) || U <- rabbit_auth_backend_internal:all_users()].
+
+user_definition(User) ->
+    #{<<"name">>              => internal_user:get_username(User),
+      <<"password_hash">>     => base64:encode(internal_user:get_password_hash(User)),
+      <<"hashing_algorithm">> => rabbit_auth_backend_internal:hashing_module_for_user(User),
+      <<"tags">>              => tags_as_binaries(internal_user:get_tags(User)),
+      <<"limits">>            => internal_user:get_limits(User)
+    }.
 
 list_runtime_parameters() ->
     [runtime_parameter_definition(P) || P <- rabbit_runtime_parameters:list(), is_list(P)].
