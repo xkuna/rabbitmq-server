@@ -33,7 +33,8 @@
          credit/4,
          dequeue/4,
          info/2,
-         state_info/1
+         state_info/1,
+         is_policy_applicable/2
          ]).
 
 -export([delete_crashed/1,
@@ -415,6 +416,19 @@ recover_durable_queues(QueuesAndRecoveryTerms) ->
                       [Pid, Error]) || {Pid, Error} <- Failures],
     [Q || {_, {new, Q}} <- Results].
 
+-spec is_policy_applicable(amqqueue:amqqueue(), any()) -> boolean().
+is_policy_applicable(_Q, Policy) ->
+    Applicable = [<<"expires">>, <<"message-ttl">>, <<"dead-letter-exchange">>,
+                  <<"dead-letter-routing-key">>, <<"max-length">>,
+                  <<"max-length-bytes">>, <<"max-in-memory-length">>, <<"max-in-memory-bytes">>,
+                  <<"max-priority">>, <<"overflow">>, <<"queue-mode">>,
+                  <<"single-active-consumer">>, <<"delivery-limit">>,
+                  <<"ha-mode">>, <<"ha-params">>, <<"ha-sync-mode">>,
+                  <<"ha-promote-on-shutdown">>, <<"ha-promote-on-failure">>,
+                  <<"queue-master-locator">>],
+    lists:all(fun({P, _}) ->
+                      lists:member(P, Applicable)
+              end, Policy).
 
 reject_seq_no(SeqNo, U0) ->
     reject_seq_no(SeqNo, U0, []).
