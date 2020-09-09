@@ -49,6 +49,7 @@
 -define(TICK_TIMEOUT, 60000).
 -define(RESTART_TIMEOUT, 1000).
 -define(PHASE_RETRY_TIMEOUT, 10000).
+-define(CMD_TIMEOUT, 30000).
 
 -record(?MODULE, {streams, monitors}).
 
@@ -120,7 +121,7 @@ process_command(Cmd) ->
 process_command([], _Cmd) ->
     {error, coordinator_unavailable};
 process_command([Server | Servers], {CmdName, _} = Cmd) ->
-    case ra:process_command(Server, Cmd) of
+    case ra:process_command(Server, Cmd, ?CMD_TIMEOUT) of
         {timeout, _} ->
             rabbit_log:warning("Coordinator timeout on server ~p when processing command ~p",
                                [Server, CmdName]),
