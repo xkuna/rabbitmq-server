@@ -109,7 +109,13 @@ declare(Q0, Node) when ?amqqueue_is_stream(Q0) ->
               "Cannot declare a queue '~s' on node '~s': ~255p",
               [rabbit_misc:rs(QName), node(), Error]);
         {ok, {existing, Q}, _} ->
-            {existing, Q}
+            {existing, Q};
+        {error, coordinator_unavailable} ->
+            _ = rabbit_amqqueue:internal_delete(QName, ActingUser),
+            rabbit_misc:protocol_error(
+              internal_error,
+              "Cannot declare a queue '~s' on node '~s': coordinator unavailable",
+              [rabbit_misc:rs(QName), node()])
     end.
 
 -spec delete(amqqueue:amqqueue(), boolean(),
