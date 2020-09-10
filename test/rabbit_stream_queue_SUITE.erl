@@ -1081,7 +1081,7 @@ max_age(Config) ->
     Q = ?config(queue_name, Config),
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
                  declare(Ch, Q, [{<<"x-queue-type">>, longstr, <<"stream">>},
-                                 {<<"x-max-age">>, longstr, <<"1s">>},
+                                 {<<"x-max-age">>, longstr, <<"10s">>},
                                  {<<"x-max-segment-size">>, long, 250}])),
 
     Payload = << <<"1">> || _ <- lists:seq(1, 500) >>,
@@ -1091,7 +1091,7 @@ max_age(Config) ->
     [publish(Ch, Q, Payload) || _ <- lists:seq(1, 100)],
     amqp_channel:wait_for_confirms(Ch, 5000),
 
-    timer:sleep(2000),
+    timer:sleep(10000),
 
     %% Let's publish again so the new segments will trigger the retention policy
     [publish(Ch, Q, Payload) || _ <- lists:seq(1, 100)],
@@ -1100,7 +1100,7 @@ max_age(Config) ->
     Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
     qos(Ch1, 200, false),
     subscribe(Ch1, Q, false, 0),
-    receive_batch(Ch1, 100, 199).
+    ?assertEqual(100, length(receive_batch())).
 
 leader_failover(Config) ->
     [Server1, Server2, Server3] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
