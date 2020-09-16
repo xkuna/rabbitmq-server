@@ -12,7 +12,8 @@
          delete_immediately/1, delete_exclusive/2, delete/4, purge/1,
          forget_all_durable/1]).
 -export([pseudo_queue/2, pseudo_queue/3, immutable/1]).
--export([lookup/1, lookup_many/1, not_found_or_absent/1, with/2, with/3, with_or_die/2,
+-export([lookup/1, lookup_many/1, not_found_or_absent/1, not_found_or_absent_dirty/1,
+         with/2, with/3, with_or_die/2,
          assert_equivalence/5,
          check_exclusive_access/2, with_exclusive_access_or_die/3,
          stat/1,
