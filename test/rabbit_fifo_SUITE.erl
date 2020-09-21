@@ -1509,10 +1509,13 @@ machine_version_test(_) ->
     {S1, _Effects} = rabbit_fifo_v0_SUITE:run_log(S0, Entries),
     Self = self(),
     {#rabbit_fifo{enqueuers = #{Self := #enqueuer{}},
+                  consumers = #{Cid := #consumer{priority = 0}},
+                  service_queue = S,
                   messages = Msgs}, ok, []} = apply(meta(Idx),
                                                     {machine_version, 0, 1}, S1),
     %% validate message conversion to lqueue
     ?assertEqual(1, lqueue:len(Msgs)),
+    ?assert(priority_queue:is_queue(S)),
     ok.
 
 queue_ttl_test(_) ->
@@ -1617,6 +1620,29 @@ queue_ttl_with_single_active_consumer_test(_) ->
     [{mod_call, rabbit_quorum_queue, spawn_deleter, [QName]}]
         = rabbit_fifo:tick(Now + 2500, S2D),
 
+    ok.
+
+checkout_priority_test(_) ->
+    Cid = {<<"checkout_priority_test">>, self()},
+    Pid = spawn(fun () -> ok end),
+    Cid2 = {<<"checkout_priority_test2">>, Pid},
+    Args = [{<<"x-priority">>, long, 1}],
+    {S1, _, _} =
+        apply(meta(3),
+              rabbit_fifo:make_checkout(Cid, {once, 2, simple_prefetch},
+                                        #{args => Args}),
+              test_init(test)),
+    {S2, _, _} =
+        apply(meta(3),
+              rabbit_fifo:make_checkout(Cid2, {once, 2, simple_prefetch},
+                                        #{args => []}),
+              S1),
+    {S3, E3} = enq(1, 1, first, S2),
+    ?ASSERT_EFF({send_msg, P, {delivery, _, _}, _}, P == self(), E3),
+    {S4, E4} = enq(2, 2, second, S3),
+    ?ASSERT_EFF({send_msg, P, {delivery, _, _}, _}, P == self(), E4),
+    {_S5, E5} = enq(3, 3, third, S4),
+    ?ASSERT_EFF({send_msg, P, {delivery, _, _}, _}, P == Pid, E5),
     ok.
 
 %% Utility
